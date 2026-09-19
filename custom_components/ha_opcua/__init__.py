@@ -28,9 +28,11 @@ from .const import (
     CONF_HUB_SCAN_INTERVAL,
     CONF_HUB_URL,
     CONF_HUB_USERNAME,
+    CONF_KNOWN_NODE_IDS,
     CONF_MANUAL_NODES,
     CONF_NODE_SETTINGS,
     CONF_OFFLINE_NODES,
+    CONF_SUBSCRIPTION_ENABLED,
     DOMAIN,
     FIELD_NODE_HUB,
     FIELD_NODE_ID,
@@ -38,7 +40,12 @@ from .const import (
     SERVICE_SET_VALUE,
 )
 from .device import async_register_device
-from .node_settings import SCALAR_TYPES, effective_platform, validate_settings
+from .node_settings import (
+    NUMERIC_TYPES,
+    SCALAR_TYPES,
+    effective_platform,
+    validate_settings,
+)
 from .orphans import (
     async_clear_orphan_repairs,
     async_setup_orphan_repairs,
@@ -57,6 +64,12 @@ _CONNECTION_STATUS_CODES = {
     ua.StatusCodes.BadServerNotConnected,
     ua.StatusCodes.BadCommunicationError,
     ua.StatusCodes.BadTimeout,
+}
+# Read denied by the server's access rights for this user: the node exists
+# and is enumerable, it just cannot be read. See OpcuaHub.discover_nodes.
+_PERMISSION_STATUS_CODES = {
+    ua.StatusCodes.BadUserAccessDenied,
+    ua.StatusCodes.BadNotReadable,
 }
 
 SERVICE_SET_VALUE_SCHEMA = vol.Schema(
@@ -102,6 +115,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hub,
         timedelta(seconds=settings.get(CONF_HUB_SCAN_INTERVAL, 10)),
         config_entry=entry,
+        subscription_enabled=settings.get(CONF_SUBSCRIPTION_ENABLED, True),
     )
     try:
         async_register_device(hass, entry)
@@ -110,6 +124,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_refresh()
         hass.data[DOMAIN][hub_id] = coordinator
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        # Only now is it safe for the coordinator to persist newly discovered
+        # nodes (which can trigger a config entry reload): forwarding entry
+        # setups above must finish first, or that reload races the still
+        # in-progress initial setup and registers duplicate entity IDs.
+        coordinator.entities_ready = True
     except BaseException as err:
         hass.data[DOMAIN].pop(hub_id, None)
         await coordinator.async_shutdown()
@@ -160,13 +179,16 @@ async def async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None
     options = {
         key: value
         for key, value in entry.options.items()
-        if key != CONF_CONNECTION_ENABLED
+        if key not in (CONF_CONNECTION_ENABLED, CONF_SUBSCRIPTION_ENABLED)
     }
     if options != coordinator.reload_options:
         await hass.config_entries.async_reload(entry.entry_id)
     else:
         await coordinator.async_set_connection_enabled(
             entry.options.get(CONF_CONNECTION_ENABLED, True), persist=False
+        )
+        await coordinator.async_set_subscription_enabled(
+            entry.options.get(CONF_SUBSCRIPTION_ENABLED, True), persist=False
         )
 
 
@@ -249,6 +271,10 @@ class OpcuaHub:
         self.last_error_type = None
         self.session_timeout_ms = None
         self._lock = asyncio.Lock()
+        self.on_data_change = None
+        self._subscription = None
+        self._subscribed_node_ids: set[str] = set()
+        self._sub_handles: dict[str, Any] = {}
 
     def _set_connected(self, connected):
         if self._connected == connected:
@@ -269,6 +295,10 @@ class OpcuaHub:
     async def _disconnect_locked(self) -> None:
         client, self.client = self.client, None
         self._set_connected(False)
+        # The subscription lives inside the closed session; it cannot be reused.
+        self._subscription = None
+        self._subscribed_node_ids = set()
+        self._sub_handles = {}
         if client is not None:
             try:
                 await client.disconnect()
@@ -400,8 +430,21 @@ class OpcuaHub:
                 except ua.UaStatusCodeError as err:
                     if _connection_error(err):
                         raise
-                    self.discovery_complete = False
-                    _LOGGER.warning("Skipping unreadable node %s: %s", node_id, err)
+                    if err.code in _PERMISSION_STATUS_CODES:
+                        # Browse found the node; only this user's read is
+                        # denied (e.g. a write-only symbol). That is a
+                        # deterministic server setting, not a transient
+                        # failure, so the pass still counts as complete -
+                        # otherwise one write-only variable would block
+                        # orphan detection and baseline pruning forever.
+                        _LOGGER.warning(
+                            "Skipping node %s without read permission: %s",
+                            node_id,
+                            err,
+                        )
+                    else:
+                        self.discovery_complete = False
+                        _LOGGER.warning("Skipping unreadable node %s: %s", node_id, err)
 
             if node_class in (
                 ua.NodeClass.Object,
@@ -442,6 +485,105 @@ class OpcuaHub:
                 self.last_successful_read = dt_util.utcnow()
         return result
 
+    @property
+    def subscription_active(self) -> bool:
+        """Whether a push subscription is actually running right now.
+
+        Distinct from the user's subscription_enabled *setting*: a rejected
+        or failed subscription falls back to polling-only while the setting
+        stays on, so this is the only reliable way to tell the two apart.
+        """
+        return self._subscription is not None
+
+    async def ensure_subscription(
+        self, node_ids: list[str], deadbands: dict[str, float] | None = None
+    ) -> None:
+        """Create/update a native OPC UA subscription so pushed changes bypass polling.
+
+        deadbands maps a NodeId to an absolute OPC UA deadband: the server
+        then only reports a change once the value has moved by at least that
+        amount, instead of on every change. A node with no entry (or a falsy
+        value) is subscribed unfiltered, as before. If the server rejects the
+        deadband filter for one node, that node alone is retried without it
+        rather than losing push updates for every node.
+        """
+        if self.on_data_change is None:
+            return
+        deadbands = deadbands or {}
+        try:
+            async with self._session() as client:
+                target = set(node_ids)
+                if self._subscription is None:
+                    self._subscription = await client.create_subscription(
+                        500, _OpcuaDataChangeHandler(self.on_data_change)
+                    )
+                    self._subscribed_node_ids = set()
+                    self._sub_handles = {}
+                to_remove = self._subscribed_node_ids - target
+                if to_remove:
+                    handles = [
+                        self._sub_handles.pop(nid)
+                        for nid in to_remove
+                        if nid in self._sub_handles
+                    ]
+                    if handles:
+                        await self._subscription.unsubscribe(handles)
+                    self._subscribed_node_ids -= to_remove
+                to_add = target - self._subscribed_node_ids
+                for nid in to_add:
+                    node = client.get_node(nid)
+                    deadband = deadbands.get(nid)
+                    handle = None
+                    if deadband:
+                        try:
+                            handle = await self._subscription.deadband_monitor(
+                                node, deadband_val=deadband, deadbandtype=1
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as err:
+                            _LOGGER.warning(
+                                "OPC UA server for '%s' rejected deadband %.6g on "
+                                "%s, subscribing without a filter instead: %s",
+                                self._hub_name,
+                                deadband,
+                                nid,
+                                err,
+                            )
+                    if handle is None:
+                        handle = await self._subscription.subscribe_data_change(node)
+                    self._sub_handles[nid] = handle
+                    self._subscribed_node_ids.add(nid)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            # Subscriptions are a latency optimization; polling must keep working
+            # even against a server that rejects or does not support them.
+            _LOGGER.warning(
+                "OPC UA subscription unavailable for '%s', falling back to polling only: %s",
+                self._hub_name,
+                err,
+            )
+            self._subscription = None
+            self._subscribed_node_ids = set()
+            self._sub_handles = {}
+
+    async def disable_subscription(self) -> None:
+        """Tear down any active push subscription; polling keeps working on its own."""
+        if self._subscription is None:
+            return
+        subscription, self._subscription = self._subscription, None
+        self._subscribed_node_ids = set()
+        self._sub_handles = {}
+        try:
+            await subscription.delete()
+        except Exception as err:
+            _LOGGER.debug(
+                "Error deleting OPC UA subscription for '%s': %s",
+                self._hub_name,
+                err,
+            )
+
     async def set_value(self, nodeid: str, value: Any) -> bool:
         """Write exactly once; a missing acknowledgement has an unknown outcome."""
         async with self._session() as client:
@@ -455,6 +597,20 @@ class OpcuaHub:
         return True
 
 
+class _OpcuaDataChangeHandler:
+    """asyncua subscription callback: forward NodeId + new value, nothing else."""
+
+    def __init__(self, callback):
+        self._callback = callback
+
+    def datachange_notification(self, node, val, data):
+        try:
+            node_id = node.nodeid.to_string()
+        except Exception:  # pragma: no cover - defensive, node is library-provided
+            return
+        self._callback(node_id, val)
+
+
 class AsyncuaCoordinator(DataUpdateCoordinator):
     """Expose polling failures and keep values indexed by NodeId."""
 
@@ -466,8 +622,10 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
         update_interval_in_second=timedelta(seconds=10),
         *,
         config_entry=None,
+        subscription_enabled=True,
     ):
         self._hub = hub
+        self.subscription_enabled = subscription_enabled
         self.enabled = (
             config_entry.options.get(CONF_CONNECTION_ENABLED, True)
             if config_entry
@@ -478,9 +636,12 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
         self.reload_options = {
             key: value
             for key, value in (config_entry.options if config_entry else {}).items()
-            if key != CONF_CONNECTION_ENABLED
+            if key not in (CONF_CONNECTION_ENABLED, CONF_SUBSCRIPTION_ENABLED)
         }
         self._control_lock = asyncio.Lock()
+        # Flipped to True by async_setup_entry once async_forward_entry_setups
+        # has returned. Guards _persist_discovery_state: see its docstring.
+        self.entities_ready = False
         self._discovery_pending = config_entry is not None
         self.nodes = {}
         self.discovered_nodes = {}
@@ -489,6 +650,17 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
             if config_entry
             else {}
         )
+        # Node IDs ever seen by this hub. Absent (None) means this entry has
+        # never run under the code that tracks this: its next discovery seeds
+        # the baseline from whatever is currently found, without treating any
+        # of it as "new" - this is what keeps a pre-existing installation's
+        # entities from silently changing domain (sensor -> number) the first
+        # time it loads under the newer code.
+        raw_known_ids = (
+            config_entry.options.get(CONF_KNOWN_NODE_IDS) if config_entry else None
+        )
+        self._known_node_ids_initialized = raw_known_ids is not None
+        self.known_node_ids: set[str] = set(raw_known_ids or [])
         self.manual_nodes = (
             dict(config_entry.options.get(CONF_MANUAL_NODES, {}))
             if config_entry
@@ -511,8 +683,13 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
             config_entry=config_entry,
         )
         self._hub.on_connection_state_change = self._connection_state_changed
+        self._hub.on_data_change = self._on_subscription_data
         if self.offline_nodes:
-            self.set_nodes([])
+            # persist=False: this pre-connection pass only has offline/manual
+            # nodes, not a real discovery snapshot - it must never seed or
+            # grow known_node_ids, or the real discovery right after would
+            # wrongly treat its nodes as "new".
+            self.set_nodes([], persist=False)
             # Cached metadata must not suppress normal discovery on reconnection.
             self._discovery_pending = config_entry is not None
 
@@ -521,6 +698,43 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
         if not self._hub.is_connected:
             self.data = {}
         self.async_update_listeners()
+
+    def _on_subscription_data(self, target_node_id, value):
+        """Push a server-reported change straight to entities, bypassing the poll timer.
+
+        Deliberately does NOT call async_set_updated_data(): that method also
+        cancels and reschedules this coordinator's own poll timer, and with
+        frequently-changing nodes the push events arrive faster than
+        update_interval, so the timer would keep getting deferred and the
+        regular poll would never fire again. Setting the data and notifying
+        listeners directly leaves the poll timer untouched, so a node that
+        never changes (and so never triggers a push) still gets refreshed on
+        schedule.
+        """
+        if not self.enabled:
+            return
+        updated = dict(self.data or {})
+        changed = False
+        for node_id, node in self.nodes.items():
+            if node["target_node_id"] == target_node_id and self._platforms.get(
+                node_id
+            ) not in (None, "disabled"):
+                updated[node_id] = value
+                changed = True
+        if changed:
+            self._hub.last_successful_read = dt_util.utcnow()
+            self.data = updated
+            self.last_update_success = True
+            self.async_update_listeners()
+
+    async def async_request_rediscovery(self) -> None:
+        """Force the next poll to re-run discovery, picking up new/removed PLC nodes.
+
+        Reuses the existing connection (no reconnect/disconnect), unlike a
+        full config entry reload.
+        """
+        self._discovery_pending = True
+        await self.async_request_refresh()
 
     @property
     def hub(self) -> OpcuaHub:
@@ -550,7 +764,51 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
                 await self._hub.pause()
                 self.async_set_updated_data({})
 
-    def set_nodes(self, nodes):
+    def _active_target_ids(self) -> list[str]:
+        active_nodes = [
+            node_id
+            for node_id in self.nodes
+            if self._platforms.get(node_id) != "disabled"
+        ]
+        return list(
+            dict.fromkeys(self.nodes[key]["target_node_id"] for key in active_nodes)
+        )
+
+    def _target_deadbands(self) -> dict[str, float]:
+        """Map each subscribed NodeId to its configured absolute deadband, if any."""
+        result: dict[str, float] = {}
+        for node_id, settings in self.node_settings.items():
+            deadband = settings.get("deadband")
+            if not deadband or self._platforms.get(node_id) == "disabled":
+                continue
+            node = self.nodes.get(node_id)
+            if node is not None:
+                result[node["target_node_id"]] = deadband
+        return result
+
+    async def async_set_subscription_enabled(self, enabled, *, persist=True):
+        """Toggle the push subscription live; polling is entirely unaffected."""
+        async with self._control_lock:
+            if self.subscription_enabled == enabled:
+                return
+            self.subscription_enabled = enabled
+            if persist and self.config_entry:
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    options={
+                        **self.config_entry.options,
+                        CONF_SUBSCRIPTION_ENABLED: enabled,
+                    },
+                )
+            if enabled:
+                await self._hub.ensure_subscription(
+                    self._active_target_ids(), self._target_deadbands()
+                )
+            else:
+                await self._hub.disable_subscription()
+            self.async_update_listeners()
+
+    def set_nodes(self, nodes, *, persist=True, full_discovery=False):
         self._discovery_pending = False
         self.discovered_nodes = {node["node_id"]: node for node in nodes}
         # Keep saved manual entities visible even if temporarily unreadable.
@@ -564,6 +822,15 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
             target = self.discovered_nodes.get(settings.get("node_id"))
             if entity_key not in candidates and target is not None:
                 candidates[entity_key] = {**target, "node_id": entity_key}
+        # A node counts as "new" only once we have a real discovery baseline to
+        # compare against (see known_node_ids docstring in __init__); until then
+        # nothing is new, so an upgrading installation is never auto-reassigned.
+        new_ids = (
+            set(candidates) - self.known_node_ids
+            if self._known_node_ids_initialized
+            else set()
+        )
+        newly_assigned = {}
         self.nodes = {}
         self._platforms = {}
         for node_id, original in candidates.items():
@@ -585,6 +852,25 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
                 "target_node_id": target_id,
             }
             self.nodes[node_id] = node
+            # A brand-new writable numeric/string node defaults to an editable
+            # control instead of the usual conservative read-only sensor.
+            # Never applies to a node that already has any saved settings
+            # (including one from a previous run of this same logic), and
+            # never retroactively to nodes that existed before this feature
+            # started tracking known_node_ids.
+            if not saved and node_id in new_ids and target is not None:
+                if node["writable"]:
+                    if node["variant_type"] in NUMERIC_TYPES:
+                        saved = {"platform": "number"}
+                    elif node["variant_type"] == "String":
+                        saved = {"platform": "text"}
+                # A brand-new REAL/LREAL node - number or sensor, writable or
+                # not - defaults to 2 decimal places instead of no rounding.
+                # Persisted immediately (like the platform above) so the
+                # panel shows "2" the first time it's opened, not a blank
+                # field silently falling back to the raw float.
+                if node["variant_type"] in {"Float", "Double"}:
+                    saved = {**saved, "precision": 2}
             try:
                 if target is None:
                     raise ValueError("node_not_found")
@@ -605,6 +891,76 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
                 self._platforms[node_id] = effective_platform(node, settings)
                 if node_id in self.node_settings:
                     self.node_settings[node_id] = settings
+                elif saved:
+                    self.node_settings[node_id] = settings
+                    newly_assigned[node_id] = settings
+        if persist:
+            self._persist_discovery_state(
+                set(candidates), newly_assigned, full_discovery=full_discovery
+            )
+
+    def _persist_discovery_state(self, seen_ids, newly_assigned, *, full_discovery):
+        """Record newly auto-configured nodes and update the known-node baseline.
+
+        Both changes go into the config entry so they survive a restart and
+        are never redecided later - an auto-assigned platform behaves exactly
+        like a manually chosen one from this point on.
+
+        Writing options can trigger a config entry reload (via
+        async_options_updated). Before entities_ready, that reload would race
+        this same entry's still-in-progress initial setup and register
+        duplicate entity IDs - see async_setup_entry. Skipping the write here
+        only delays it to the next refresh, a few seconds later at most.
+
+        After a *complete* discovery pass, seen_ids is the ground truth of
+        what currently exists (plus manual/offline entries, which are always
+        part of candidates regardless of live discovery), so the baseline is
+        pruned down to exactly that - a PLC variable that was renamed or
+        removed stops accumulating as dead weight. A partial pass (some node
+        skipped after a transient read error) only ever adds to the baseline,
+        never removes: shrinking it there would make an unreadable-this-cycle
+        node look "new" again next time, which is exactly what this baseline
+        exists to prevent.
+        """
+        if not self.config_entry or not self.entities_ready:
+            return
+        updated_known = (
+            set(seen_ids) if full_discovery else self.known_node_ids | seen_ids
+        )
+        changed = (
+            not self._known_node_ids_initialized or updated_known != self.known_node_ids
+        )
+        if not newly_assigned and not changed:
+            return
+        options = dict(self.config_entry.options)
+        if newly_assigned:
+            node_settings_opt = dict(options.get(CONF_NODE_SETTINGS, {}))
+            node_settings_opt.update(newly_assigned)
+            options[CONF_NODE_SETTINGS] = node_settings_opt
+        if changed:
+            options[CONF_KNOWN_NODE_IDS] = sorted(updated_known)
+            self.known_node_ids = updated_known
+            self._known_node_ids_initialized = True
+        # This entry's running coordinator already reflects the new state in
+        # memory (nodes/_platforms were just recomputed from it) - reloading
+        # would only rebuild the same thing, while racing this same reload
+        # against the poll cycle that is still in flight: the unload closes
+        # the hub under the running read, and an entity added by a listener
+        # in that window survives the platform unload as a zombie, so the
+        # fresh setup then fails with a duplicate unique_id. Syncing
+        # reload_options to what is about to be written makes
+        # async_options_updated's comparison see no difference, so it takes
+        # its "apply live, don't reload" branch instead.
+        #
+        # This MUST happen before async_update_entry: HA starts update
+        # listeners eagerly, so async_options_updated runs synchronously
+        # inside that call up to its first await - including the comparison.
+        self.reload_options = {
+            key: value
+            for key, value in options.items()
+            if key not in (CONF_CONNECTION_ENABLED, CONF_SUBSCRIPTION_ENABLED)
+        }
+        self.hass.config_entries.async_update_entry(self.config_entry, options=options)
 
     def nodes_for_platform(self, platform):
         return (
@@ -643,7 +999,13 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
                     nodes.append(metadata)
                     self._manual_pending.discard(node_id)
             if discovering or pending:
-                self.set_nodes(nodes)
+                # Only a discovery pass that ran to completion (nothing
+                # skipped after a read error) is trustworthy ground truth for
+                # pruning known_node_ids; see _persist_discovery_state.
+                self.set_nodes(
+                    nodes,
+                    full_discovery=discovering and self._hub.discovery_complete,
+                )
             if discovering:
                 try:
                     if self.config_entry and nodes:
@@ -656,15 +1018,23 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
                 for node_id in self.nodes
                 if self._platforms[node_id] != "disabled"
             ]
-            target_ids = list(
-                dict.fromkeys(self.nodes[key]["target_node_id"] for key in active_nodes)
-            )
+            target_ids = self._active_target_ids()
             raw_values = await self._hub.get_values(target_ids)
             values = {
                 key: raw_values[self.nodes[key]["target_node_id"]]
                 for key in active_nodes
                 if self.nodes[key]["target_node_id"] in raw_values
             }
+            # Keep the push subscription's node set aligned with what we just polled;
+            # future changes to these nodes then arrive immediately instead of waiting
+            # for the next timer tick. Polling itself is untouched either way, so a
+            # value that never changes is still re-read on every configured interval.
+            if self.subscription_enabled:
+                await self._hub.ensure_subscription(
+                    target_ids, self._target_deadbands()
+                )
+            else:
+                await self._hub.disable_subscription()
         except Exception as err:
             # A pause can overtake an already scheduled read. It is not a failure.
             if not self.enabled:

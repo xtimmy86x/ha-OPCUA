@@ -17,3 +17,5 @@ FIELD_NODE_ID = "node_id"
 FIELD_VALUE = "value"
 
 CONF_CONNECTION_ENABLED = "connection_enabled"
+CONF_SUBSCRIPTION_ENABLED = "subscription_enabled"
+CONF_KNOWN_NODE_IDS = "known_node_ids"
