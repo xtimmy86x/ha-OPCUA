@@ -1,6 +1,6 @@
 /* Native Home Assistant configuration panel. No external scripts or styles. */
 // Bump for every frontend change; displayed from the loaded JavaScript bundle.
-const PANEL_VERSION = "1.9.2";
+const PANEL_VERSION = "1.11.3";
 const TEXT = {
   it: {
     version: "Integrazione",
@@ -59,7 +59,7 @@ const TEXT = {
       "Solo Auto-Subscription: sopprime un aggiornamento push più piccolo di questa variazione assoluta (es. 0,01 nasconde il rumore in virgola mobile oltre la 2ª cifra decimale). 0 disattiva il filtro. Il polling non è interessato e legge sempre il valore esatto.",
     unit: "Unità di misura",
     unitHelp:
-      "Scegli un'unità standard di Home Assistant, «Nessuna» oppure «Personalizzata…» per digitarne una (es. pieces/min), mostrata accanto al valore.",
+      "Scegli un'unità standard di Home Assistant, «Nessuna» oppure «Personalizzata…». Le maiuscole contano: mV è millivolt, MV è megavolt.",
     filterUnits: "Cerca unità…",
     moreInfo: "Dettagli",
     noMatches: "Nessun risultato",
@@ -97,6 +97,8 @@ const TEXT = {
     groupModeLabel: "Raggruppamento",
     groupByCategory: "Per categoria",
     groupByArray: "Per elemento array",
+    groupByHierarchy: "Per gerarchia",
+    otherNodes: "Altri nodi",
     renameFields: "Rinomina campi duplicati",
     renameFieldsTitle: "Disambigua i campi con nomi ripetuti",
     renameFieldsHelp:
@@ -192,6 +194,25 @@ const TEXT = {
     invert: "Inverti stato booleano",
     invertHelp: "Per gli switch si invertono anche i comandi inviati al PLC.",
     save: "Salva",
+    stage: "Aggiungi alle modifiche",
+    saveAll: "Salva tutte le modifiche",
+    reviewChanges: "Rivedi modifiche",
+    discardChanges: "Scarta modifiche",
+    staged: "Modifiche in attesa di salvataggio.",
+    staleDraft:
+      "La configurazione è cambiata. Controlla e ricrea le modifiche prima di salvare.",
+    groupSettings: "Impostazioni gruppo",
+    groupMembersSection: "Entità del gruppo",
+    groupHelp:
+      "Scegli le entità e solo i parametri da modificare. Le entità con modifiche già in attesa non sono selezionate: selezionale per applicare anche a loro i parametri del gruppo.",
+    noChange: "Non modificare",
+    setValue: "Imposta",
+    clearValue: "Cancella",
+    copyName: "Copia nome completo",
+    openMoreInfo: "Apri dettagli entità",
+    copied: "Copiato",
+    copyFailed: "Impossibile copiare il nome.",
+    invalid_group: "Controlla i valori del gruppo.",
     cancel: "Annulla",
     saving: "Salvataggio…",
     loading: "Caricamento…",
@@ -284,7 +305,7 @@ const TEXT = {
       "Auto-Subscription only: suppress a push update smaller than this absolute change (e.g. 0.01 hides float noise below the 2nd decimal). 0 disables filtering. Polling is unaffected and always reads the exact value.",
     unit: "Unit of measurement",
     unitHelp:
-      "Pick a standard Home Assistant unit, “None”, or “Custom…” to type one (e.g. pieces/min), shown next to the value.",
+      "Pick a standard Home Assistant unit, “None”, or “Custom…”. Unit symbols are case-sensitive: mV is millivolt, MV is megavolt.",
     filterUnits: "Search units…",
     moreInfo: "Details",
     noMatches: "No results",
@@ -330,6 +351,8 @@ const TEXT = {
     groupModeLabel: "Grouping",
     groupByCategory: "By category",
     groupByArray: "By array element",
+    groupByHierarchy: "By hierarchy",
+    otherNodes: "Other nodes",
     renameFields: "Rename duplicate fields",
     renameFieldsTitle: "Disambiguate fields with repeated names",
     renameFieldsHelp:
@@ -414,6 +437,25 @@ const TEXT = {
     invert: "Invert boolean state",
     invertHelp: "For switches, commands sent to the PLC are also inverted.",
     save: "Save",
+    stage: "Add to pending changes",
+    saveAll: "Save all changes",
+    reviewChanges: "Review changes",
+    discardChanges: "Discard changes",
+    staged: "Changes are pending save.",
+    staleDraft:
+      "Configuration changed. Review and recreate pending changes before saving.",
+    groupSettings: "Group settings",
+    groupMembersSection: "Entities in this group",
+    groupHelp:
+      "Select entities and only the settings to change. Entities with pending edits start unchecked; select them to apply group settings to those drafts too.",
+    noChange: "No change",
+    setValue: "Set",
+    clearValue: "Clear",
+    copyName: "Copy full name",
+    openMoreInfo: "Open entity details",
+    copied: "Copied",
+    copyFailed: "Could not copy the name.",
+    invalid_group: "Check the group values.",
     cancel: "Cancel",
     saving: "Saving…",
     loading: "Loading…",
@@ -457,6 +499,22 @@ const GROUPS = [
   "datetime",
   "disabled",
 ];
+function hierarchyParts(source) {
+  const path = typeof source === "string" ? source : source?.hierarchy_path;
+  const segments =
+    typeof source === "object" ? source?.hierarchy_segments : null;
+  if (typeof path !== "string" || !path.includes(".")) return [];
+  const parts = (
+    Array.isArray(segments) && segments.length > 1 ? segments : path.split(".")
+  )
+    .flatMap((part) => part.match(/[^\[\]]+|\[[^\]]+\]/g) || [])
+    .filter(Boolean);
+  if (parts.length < 2) return [];
+  // Keep the PLC data block and its first child together as one top-level folder.
+  return parts.length > 2
+    ? [parts.slice(0, 2).join("."), ...parts.slice(2)]
+    : parts;
+}
 const NUMERIC = new Set([
   "SByte",
   "Byte",
@@ -548,6 +606,8 @@ function compatible(row, node) {
   return true;
 }
 const CSS = `
+.viewToggle.groupToggle{flex-wrap:wrap}.groupToggle button{font-size:12px;line-height:1.2;padding:8px 10px;white-space:nowrap}
+.hierarchyBranch{margin:0 0 8px;min-width:0}.hierarchyBranch>summary{display:flex;align-items:center;gap:10px;min-height:44px;padding:8px 12px;list-style:none;cursor:pointer;border:1px solid var(--divider-color,#dce2ea);border-radius:10px;background:var(--card-background-color,#fff);font-weight:600;overflow-wrap:anywhere}.hierarchyBranch>summary::-webkit-details-marker{display:none}.hierarchyBranch>summary::before{content:"";width:8px;height:8px;flex:0 0 8px;border-right:2px solid var(--secondary-text-color,#8a97a8);border-bottom:2px solid var(--secondary-text-color,#8a97a8);transform:rotate(-45deg);transition:transform var(--speed) ease}.hierarchyBranch[open]>summary::before{transform:rotate(45deg)}.hierarchyBranch>summary:hover{border-color:var(--primary-color,#008fac)}.hierarchyContent{display:grid;gap:8px;margin:7px 0 14px 7px;padding-left:15px;border-left:1px solid var(--divider-color,#dce2ea);min-width:0}.hierarchyContent>.grid{margin:2px 0 4px}.hierarchyContent .hierarchyBranch{margin-bottom:0}@media(max-width:650px){.hierarchyContent{padding-left:10px;margin-left:5px}.groupToggle button{white-space:normal}}
 :host{display:flex;flex-direction:column;height:100%;min-height:0;color:var(--primary-text-color,#243346);background:var(--primary-background-color,#f5f7fb);font:14px var(--paper-font-body1_-_font-family,Roboto,Arial,sans-serif);--accent-sensor:#0f9d8a;--accent-binary_sensor:#6366f1;--accent-switch:#d97a06;--accent-number:#7c4fd6;--accent-text:#e0447a;--accent-datetime:#0891b2;--accent-disabled:var(--disabled-text-color,#9aa5b1);--speed:180ms}
 @media(prefers-reduced-motion:reduce){:host{--speed:0ms}}
 *{box-sizing:border-box}button,input,select{font:inherit}button{cursor:pointer;border:1px solid var(--divider-color,#dce2ea);border-radius:10px;padding:10px 15px;background:var(--card-background-color,#fff);color:inherit;min-height:42px;transition:background var(--speed),border-color var(--speed)}button:hover{border-color:var(--primary-color,#009ac0);background:color-mix(in srgb,var(--primary-color,#009ac0) 5%,var(--card-background-color,#fff))}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--primary-color,#009ac0);outline-offset:3px}.primary,.primary:hover{background:var(--primary-color,#008fac);border-color:transparent;color:var(--text-primary-color,#fff)}
@@ -575,9 +635,10 @@ dialog{border:1px solid var(--divider-color,#dce2ea);border-radius:18px;width:mi
 @media(max-width:650px){header{padding:14px 12px;gap:8px}h1{font-size:20px}.content{padding:16px 12px 32px}.endpointPanel{padding:15px;margin-bottom:18px}.toolbar{grid-template-columns:1fr;gap:12px}.endpointMeta{gap:12px}.endpointIdentity{flex-basis:100%}.endpointActions{width:100%}.endpointActions button{flex:1;min-height:44px}.endpointSubscription{gap:5px;padding-top:12px}.endpointSubscription .toggle{width:100%;min-height:44px}.grid{grid-template-columns:1fr}.navRow{gap:10px}nav{gap:3px}nav button{padding:8px 10px;min-height:42px}.card{padding:15px}.grid.list .card{grid-template-columns:minmax(0,1fr);gap:12px;padding:14px}.grid.list .cardBottom{flex-direction:row;justify-content:space-between;align-items:center;border-top:1px solid var(--divider-color,#e2e7ef);padding-top:10px}.grid.list .cardBottom .meta{text-align:left}.grid.list .entityState{display:flex;align-items:baseline;gap:10px}.actions button{min-height:42px}form{padding:20px}.entityForm{padding:0}.editorBody{padding:20px}.entityForm footer{padding-left:20px;padding-right:20px}.entityForm footer button{min-height:44px}.headerText p{font-size:12px}}
 .grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,270px),1fr));gap:10px;align-items:start}.card{padding:12px 14px;border-radius:11px}.card h3{font-size:14px;margin-bottom:3px}.address{font-size:10px}.cardTop .badge{font-size:10px;padding:2px 6px}.entityState{display:flex;align-items:center;gap:12px;flex:0 0 auto;margin-top:12px;min-height:48px}.valueIcon{display:flex;align-items:center;justify-content:center;width:38px;height:38px;flex:0 0 38px;border-radius:10px;color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}.valueIcon svg{width:23px;height:23px}.stateContent{min-width:0;flex:1}.stateLabel{font-size:10px;margin-bottom:2px}.stateValue{font-size:26px;font-weight:650;line-height:1.25;max-height:5em}.card[data-value-type="text"] .stateValue{font-size:15px;font-weight:400;line-height:1.45}.card[data-value-type="text"] .valueIcon{color:var(--accent-text);background:color-mix(in srgb,var(--accent-text) 10%,transparent)}.card[data-value-type="datetime"] .stateValue{font-size:15px;font-weight:500;line-height:1.45}.card[data-value-type="boolean"] .stateValue{font-size:16px;font-weight:600}.card[data-value-type="boolean"] .valueIcon{border-radius:50%;color:var(--secondary-text-color,#637487);background:color-mix(in srgb,var(--secondary-text-color,#637487) 10%,transparent)}.card[data-tone="active"] .valueIcon{color:var(--primary-color,#008fac);background:color-mix(in srgb,var(--primary-color,#008fac) 15%,transparent)}.card[data-tone="active"] .stateValue{color:var(--primary-color,#008fac)}.card[data-tone="alert"] .valueIcon{color:var(--error-color,#be3131);background:color-mix(in srgb,var(--error-color,#be3131) 12%,transparent)}.card[data-tone="alert"] .stateValue{color:var(--error-color,#be3131)}.card:not([data-state-kind="value"]) .stateValue{font-size:14px;font-weight:400;color:var(--secondary-text-color,#637487)}.card:not([data-state-kind="value"]) .valueIcon{color:var(--secondary-text-color,#637487);background:color-mix(in srgb,var(--secondary-text-color,#637487) 8%,transparent)}.card[data-state-kind="empty"] .stateValue{font-style:italic}.retainedValue{display:inline-block;font-size:10px;line-height:1.4;margin-top:5px;padding:2px 6px;border-radius:4px;color:var(--primary-text-color,#243346);background:color-mix(in srgb,var(--warning-color,#e0a000) 18%,var(--card-background-color,#fff))}.cardBottom{margin-top:8px;padding-top:0;border-top:0;gap:8px}.cardBottom .meta{font-size:11px}.cardBottom .actions button{padding:5px 10px;min-height:32px;font-size:12px}.grid.list .card{padding:10px 14px;gap:16px;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) minmax(150px,.55fr)}.grid.list .entityState{margin:0;min-height:40px;gap:10px}.grid.list .stateValue{font-size:21px}.grid.list .card[data-value-type="text"] .stateValue,.grid.list .card[data-value-type="datetime"] .stateValue{font-size:14px}.grid.list .card[data-value-type="boolean"] .stateValue{font-size:15px}.grid.list .card:not([data-state-kind="value"]) .stateValue{font-size:14px}.grid.list .valueIcon{width:32px;height:32px;flex-basis:32px}.grid.list .valueIcon svg{width:20px;height:20px}
 @media(max-width:650px){.grid{grid-template-columns:1fr}.card{padding:12px}.grid.list .card{grid-template-columns:minmax(0,1fr);gap:10px;padding:12px}.grid.list .entityState{align-items:center}.cardBottom .actions button{min-height:44px;padding:8px 12px}.cardBottom .meta{font-size:11px}}
-.card{--value-accent:var(--accent)}.card[data-value-type="text"]{--value-accent:var(--accent-text)}.card[data-value-type="datetime"]{--value-accent:var(--accent-datetime)}.card[data-value-type="boolean"]{--value-accent:var(--secondary-text-color,#637487)}.card[data-tone="active"]{--value-accent:var(--primary-color,#008fac)}.card[data-tone="alert"]{--value-accent:var(--error-color,#be3131)}.card:not([data-state-kind="value"]){--value-accent:var(--secondary-text-color,#637487)}.entityState{margin-top:8px;padding:6px 10px;gap:10px;border:1px solid color-mix(in srgb,var(--value-accent) 24%,transparent);border-radius:10px;background:color-mix(in srgb,var(--value-accent) 9%,var(--card-background-color,#fff));max-width:100%}.card .entityState .valueIcon{width:30px;height:30px;flex-basis:30px;background:transparent;color:var(--value-accent)}.grid.list .entityState{width:fit-content;max-width:100%;padding:6px 10px}.card[data-tone="alert"] .stateValue{color:color-mix(in srgb,var(--error-color,#be3131) 70%,var(--primary-text-color,#243346))}
+.card{--value-accent:var(--accent)}.card[data-value-type="text"]{--value-accent:var(--accent-text)}.card[data-value-type="datetime"]{--value-accent:var(--accent-datetime)}.card[data-value-type="boolean"]{--value-accent:var(--secondary-text-color,#637487)}.card[data-tone="active"]{--value-accent:var(--primary-color,#008fac)}.card[data-tone="alert"]{--value-accent:var(--error-color,#be3131)}.card:not([data-state-kind="value"]){--value-accent:var(--secondary-text-color,#637487)}.entityState{margin-top:8px;padding:6px 10px;gap:10px;border:1px solid color-mix(in srgb,var(--value-accent) 24%,transparent);border-radius:10px;background:color-mix(in srgb,var(--value-accent) 9%,var(--card-background-color,#fff));max-width:100%}.entityState.moreInfo{appearance:none;color:inherit;text-align:left;cursor:pointer}.entityState.moreInfo:hover{border-color:var(--value-accent);background:color-mix(in srgb,var(--value-accent) 15%,var(--card-background-color,#fff))}.card .entityState .valueIcon{width:30px;height:30px;flex-basis:30px;background:transparent;color:var(--value-accent)}.grid.list .entityState{width:fit-content;max-width:100%;padding:6px 10px}.card[data-tone="alert"] .stateValue{color:color-mix(in srgb,var(--error-color,#be3131) 70%,var(--primary-text-color,#243346))}
 .customizations{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px;min-width:0;order:2}.customizationBadge{padding:3px 7px;border-radius:5px;background:color-mix(in srgb,var(--secondary-text-color,#637487) 8%,transparent);border:1px solid var(--divider-color,#dce2ea);color:var(--secondary-text-color,#637487);font-size:11px;line-height:1.4;max-width:100%;overflow-wrap:anywhere}.cardBottom{order:3}.grid.list .cardBottom{order:0}.grid.list .customizations{grid-column:1/-1;order:1;margin-top:-4px}.grid.list .card:has(.customizations){row-gap:10px}
 @media(max-width:650px){.grid.list .customizations{margin-top:0}.grid.list .cardBottom{order:2}}
+.copyName{align-self:flex-start;white-space:nowrap;font-size:11px;padding:5px 8px}.hierarchyBranch>summary .groupSettings{margin-left:auto;flex-shrink:0;font-size:12px;padding:5px 9px;font-weight:500}.groupEditor .entityForm{max-height:min(86vh,900px)}.groupEditor .editorHeading{display:block}.groupEditor .editorHeading .hint{margin:5px 0 0}.groupMembers{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr));gap:5px;max-height:200px;overflow:auto;padding:8px;border:1px solid var(--divider-color,#dce2ea);border-radius:8px}.groupMember{display:flex;align-items:center;gap:8px;overflow-wrap:anywhere;padding:4px}.groupMember input{width:18px;min-width:18px}.groupField{display:flex;flex-direction:column;gap:7px;min-width:0}.groupField>span{font-weight:600;font-size:13px}.groupField select,.groupField input{width:100%;min-width:0}.groupField .unitPicker>span{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.groupLimits,.groupConversionArgs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:5px}.groupLimits .field,.groupConversionArgs .field{min-width:0}.draftReview{display:grid;gap:8px;max-height:55vh;overflow:auto}.draftReviewItem{display:grid;gap:4px;padding:10px;border:1px solid var(--divider-color,#dce2ea);border-radius:8px;overflow-wrap:anywhere}.draftReviewItem code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}.draftReviewItem button{justify-self:start}.draftReviewItem small{color:var(--secondary-text-color,#637487)}@media(max-width:650px){.hierarchyBranch>summary{flex-wrap:wrap}.hierarchyBranch>summary .groupSettings{margin-left:0}.copyName{white-space:normal}.groupLimits,.groupConversionArgs{grid-template-columns:1fr}}
 `;
 class OpcuaNodePanel extends HTMLElement {
   constructor() {
@@ -588,17 +649,20 @@ class OpcuaNodePanel extends HTMLElement {
     this._selected = "";
     this._generation = 0;
     this._viewMode = "grid";
-    // Category grouping is the long-standing default; array-element
-    // grouping is an explicit opt-in the user can switch to, mirroring the
-    // grid/list preference below rather than silently replacing it.
-    this._groupMode = "category";
+    this._groupMode = "hierarchy";
+    this._openPaths = new Set();
     this._subscriptionPending = new Set();
     this._subscriptionErrors = new Set();
+    this._drafts = {};
     try {
+      this._drafts = JSON.parse(
+        sessionStorage.getItem("ha-opcua-drafts") || "{}",
+      );
+      if (!this._drafts || typeof this._drafts !== "object") this._drafts = {};
       const stored = localStorage.getItem("ha-opcua-view-mode");
       if (stored === "grid" || stored === "list") this._viewMode = stored;
       const storedGroup = localStorage.getItem("ha-opcua-group-mode");
-      if (storedGroup === "category" || storedGroup === "array")
+      if (["category", "array", "hierarchy"].includes(storedGroup))
         this._groupMode = storedGroup;
     } catch {
       /* private browsing / blocked storage: keep the default */
@@ -613,9 +677,21 @@ class OpcuaNodePanel extends HTMLElement {
     return this._hass;
   }
   connectedCallback() {
+    this._beforeUnload = (event) => {
+      if (
+        !Object.values(this._drafts).some(
+          (bucket) => Object.keys(bucket.changes || {}).length,
+        )
+      )
+        return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", this._beforeUnload);
     if (this._hass) this._start();
   }
   disconnectedCallback() {
+    window.removeEventListener("beforeunload", this._beforeUnload);
     clearTimeout(this._timer);
     this._generation++;
     this._started = false;
@@ -644,6 +720,144 @@ class OpcuaNodePanel extends HTMLElement {
   }
   _endpoint() {
     return this._data?.endpoints.find((e) => e.entry_id === this._selected);
+  }
+  _draftBucket(endpoint = this._endpoint()) {
+    if (!endpoint) return null;
+    return this._drafts[endpoint.entry_id] || null;
+  }
+  _persistDrafts() {
+    try {
+      sessionStorage.setItem("ha-opcua-drafts", JSON.stringify(this._drafts));
+    } catch {
+      /* The active tab still retains the drafts. */
+    }
+  }
+  _stage(endpoint, payload) {
+    const bucket = this._drafts[endpoint.entry_id] || {
+      revision: endpoint.revision,
+      changes: {},
+    };
+    if (bucket.revision !== endpoint.revision) throw new Error("staleDraft");
+    bucket.changes[payload.key] = payload;
+    this._drafts[endpoint.entry_id] = bucket;
+    this._persistDrafts();
+    this._notice = this._t("staged");
+    this._render();
+  }
+  _changeSummary(row, change) {
+    if (!row) return change;
+    const baseline = {
+      platform: row.settings?.platform || row.platform,
+      name: row.custom_name || "",
+      area_id: row.area_id || null,
+      node_id: row.node_id,
+      device_class: row.device_class || null,
+      invert_state: Boolean(row.invert_state),
+      ...row.settings,
+    };
+    const summary = {};
+    for (const [key, value] of Object.entries(change)) {
+      if (["key", "entry_id", "revision"].includes(key)) continue;
+      if (key === "limits") {
+        const changed = Object.fromEntries(
+          Object.entries(value).filter(
+            ([field, next]) =>
+              JSON.stringify(baseline[field]) !== JSON.stringify(next),
+          ),
+        );
+        if (Object.keys(changed).length) summary.limits = changed;
+      } else if (
+        JSON.stringify(baseline[key] ?? null) !== JSON.stringify(value ?? null)
+      ) {
+        summary[key] = value;
+      }
+    }
+    return summary;
+  }
+  _reviewDrafts(endpoint) {
+    const bucket = this._draftBucket(endpoint);
+    const changes = Object.values(bucket?.changes || {});
+    if (!changes.length) return;
+    const dialog = element("dialog", undefined, { class: "entityEditor" });
+    const title = element(
+      "h2",
+      `${this._t("reviewChanges")} · ${changes.length}`,
+    );
+    const list = element("div", undefined, { class: "draftReview" });
+    for (const change of changes) {
+      const row = endpoint.rows.find((item) => item.key === change.key);
+      const item = element("div", undefined, { class: "draftReviewItem" });
+      item.append(
+        element("strong", row?.hierarchy_path || change.key),
+        element("small", row?.entity_id || ""),
+        element(
+          "code",
+          JSON.stringify(this._changeSummary(row, change), null, 2),
+        ),
+      );
+      const remove = this._button("discardChanges", () => {
+        delete bucket.changes[change.key];
+        if (!Object.keys(bucket.changes).length)
+          delete this._drafts[endpoint.entry_id];
+        this._persistDrafts();
+        dialog.close();
+        this._render();
+      });
+      item.append(remove);
+      list.append(item);
+    }
+    const error = element(
+      "p",
+      bucket.revision !== endpoint.revision ? this._t("staleDraft") : "",
+      {
+        class: "error",
+        role: "alert",
+      },
+    );
+    const footer = element("footer");
+    const cancel = this._button("cancel", () => dialog.close());
+    const save = this._button(
+      "saveAll",
+      async () => {
+        save.disabled = true;
+        error.textContent = "";
+        try {
+          if (bucket.revision !== endpoint.revision)
+            throw new Error("staleDraft");
+          const result = await this._hass.callWS({
+            type: "ha_opcua/entities/batch_update",
+            entry_id: endpoint.entry_id,
+            revision: bucket.revision,
+            changes: Object.values(bucket.changes),
+          });
+          delete this._drafts[endpoint.entry_id];
+          this._persistDrafts();
+          this._notice = this._t(result.reload ? "reloading" : "saved");
+          dialog.close();
+          await this._load();
+          if (result.reload) {
+            clearTimeout(this._timer);
+            this._timer = setTimeout(() => this._load(), 2500);
+          }
+        } catch (err) {
+          error.textContent = this._t(
+            err.code in TEXT.en
+              ? err.code
+              : err.message === "staleDraft"
+                ? "staleDraft"
+                : "error",
+          );
+          save.disabled = false;
+        }
+      },
+      "primary",
+    );
+    save.disabled = bucket.revision !== endpoint.revision;
+    footer.append(error, cancel, save);
+    dialog.append(title, list, footer);
+    dialog.addEventListener("close", () => dialog.remove());
+    this.shadowRoot.append(dialog);
+    dialog.showModal();
   }
   async _load() {
     if (!this._hass?.user?.is_admin) {
@@ -738,6 +952,7 @@ class OpcuaNodePanel extends HTMLElement {
       this._selected = endpoints.value;
       this._notice = "";
       this._filter = "all";
+      this._openPaths.clear();
       this._render();
     });
     const search = element("input", undefined, {
@@ -797,6 +1012,25 @@ class OpcuaNodePanel extends HTMLElement {
     });
     rediscover.disabled = !endpoint.loaded;
     endpointActions.append(add, rediscover);
+    const pending = Object.keys(
+      this._draftBucket(endpoint)?.changes || {},
+    ).length;
+    if (pending) {
+      const saveAll = this._button(
+        "saveAll",
+        () => this._reviewDrafts(endpoint),
+        "primary",
+      );
+      saveAll.textContent = `${this._t("saveAll")} (${pending})`;
+      endpointActions.prepend(saveAll);
+      if (this._draftBucket(endpoint).revision !== endpoint.revision)
+        endpointPanel.append(
+          element("p", this._t("staleDraft"), {
+            class: "error",
+            role: "alert",
+          }),
+        );
+    }
     const subscriptionControl = element("div", undefined, {
       class: "endpointSubscription",
     });
@@ -915,17 +1149,26 @@ class OpcuaNodePanel extends HTMLElement {
       viewToggle.append(button);
     }
     navRow.append(viewToggle);
-    // Only worth offering when this endpoint actually has array-of-struct
-    // fields to group - otherwise it is a control with no visible effect.
-    if (endpoint.rows.some((r) => r.array_group)) {
+    const hasHierarchy = endpoint.rows.some((r) => hierarchyParts(r).length);
+    if (endpoint.rows.some((r) => r.array_group) || hasHierarchy) {
+      const activeGroupMode =
+        this._groupMode === "hierarchy" && !hasHierarchy
+          ? "category"
+          : this._groupMode;
       const groupToggle = element("div", undefined, {
-        class: "viewToggle",
+        class: "viewToggle groupToggle",
         role: "group",
         "aria-label": this._t("groupModeLabel"),
       });
-      for (const mode of ["category", "array"]) {
+      const modes = ["hierarchy", "category"];
+      if (endpoint.rows.some((r) => r.array_group)) modes.push("array");
+      for (const mode of modes) {
         const button = this._button(
-          mode === "category" ? "groupByCategory" : "groupByArray",
+          {
+            hierarchy: "groupByHierarchy",
+            category: "groupByCategory",
+            array: "groupByArray",
+          }[mode],
           () => {
             if (this._groupMode === mode) return;
             this._groupMode = mode;
@@ -936,9 +1179,9 @@ class OpcuaNodePanel extends HTMLElement {
             }
             this._render();
           },
-          this._groupMode === mode ? "selected" : "",
+          activeGroupMode === mode ? "selected" : "",
         );
-        button.setAttribute("aria-pressed", String(this._groupMode === mode));
+        button.setAttribute("aria-pressed", String(activeGroupMode === mode));
         groupToggle.append(button);
       }
       navRow.append(groupToggle);
@@ -1050,7 +1293,7 @@ class OpcuaNodePanel extends HTMLElement {
       add("node_id", this._t("remappedBadge"), `${row.key} → ${row.node_id}`);
     return badges.childElementCount ? badges : null;
   }
-  _buildCard(row) {
+  _buildCard(row, shortName = false, showMoreInfo = true) {
     const type = valueType(row);
     const card = element("article", undefined, {
       class: row.orphan ? "card orphan" : "card",
@@ -1059,10 +1302,27 @@ class OpcuaNodePanel extends HTMLElement {
     });
     const top = element("div", undefined, { class: "cardTop" });
     const text = element("div", undefined, { class: "cardTitle" });
+    const cardName = row.hierarchy_path || row.name || row.node_id;
     text.append(
-      element("h3", row.name || row.node_id),
+      element("h3", cardName, { title: cardName }),
       element("div", row.node_id, { class: "address" }),
     );
+    if (row.custom_name && row.custom_name !== cardName)
+      text.append(element("div", row.custom_name, { class: "meta" }));
+    if (row.hierarchy_path) {
+      const copy = this._button("copyName", async () => {
+        try {
+          await navigator.clipboard.writeText(row.hierarchy_path);
+          copy.textContent = this._t("copied");
+          setTimeout(() => (copy.textContent = this._t("copyName")), 1800);
+        } catch {
+          this._notice = this._t("copyFailed");
+          this._render();
+        }
+      });
+      copy.classList.add("copyName");
+      top.append(copy);
+    }
     top.append(text);
     // An orphan row may have no cached type (node gone, never "always available").
     if (row.variant_type)
@@ -1093,7 +1353,28 @@ class OpcuaNodePanel extends HTMLElement {
         );
     }
     bottom.append(actions);
-    const state = element("div", undefined, { class: "entityState" });
+    const canShowMoreInfo =
+      showMoreInfo && row.entity_id && row.platform !== "disabled";
+    const state = element(canShowMoreInfo ? "button" : "div", undefined, {
+      class: canShowMoreInfo ? "entityState moreInfo" : "entityState",
+      ...(canShowMoreInfo
+        ? {
+            type: "button",
+            "aria-label": `${this._t("openMoreInfo")}: ${cardName}`,
+            title: this._t("openMoreInfo"),
+          }
+        : {}),
+    });
+    if (canShowMoreInfo)
+      state.addEventListener("click", () =>
+        state.dispatchEvent(
+          new CustomEvent("hass-more-info", {
+            detail: { entityId: row.entity_id },
+            bubbles: true,
+            composed: true,
+          }),
+        ),
+      );
     const icon = element("span", undefined, {
       class: "valueIcon",
       "aria-hidden": "true",
@@ -1166,6 +1447,93 @@ class OpcuaNodePanel extends HTMLElement {
     details.append(container);
     this._rows.append(details);
   }
+  _renderHierarchy(rows, searching) {
+    const root = { children: new Map(), rows: [], count: 0, allRows: [] };
+    const other = [];
+    for (const row of rows) {
+      const parts = hierarchyParts(row);
+      if (!parts.length) {
+        other.push(row);
+        continue;
+      }
+      let branch = root;
+      for (const part of parts.slice(0, -1)) {
+        if (!branch.children.has(part))
+          branch.children.set(part, {
+            children: new Map(),
+            rows: [],
+            count: 0,
+            allRows: [],
+          });
+        branch = branch.children.get(part);
+        branch.count++;
+        branch.allRows.push(row);
+      }
+      branch.rows.push(row);
+    }
+    const renderBranch = (label, branch, parentPath) => {
+      const path = `${parentPath}/${label}`;
+      const details = element("details", undefined, {
+        class: "hierarchyBranch",
+        "data-path": path,
+      });
+      if (searching || this._openPaths.has(path)) details.open = true;
+      details.addEventListener("toggle", () => {
+        if (searching) return;
+        if (details.open) this._openPaths.add(path);
+        else this._openPaths.delete(path);
+      });
+      const summary = element("summary", `${label} · ${branch.count}`);
+      const eligible =
+        !searching &&
+        this._filter === "all" &&
+        branch.allRows?.length > 0 &&
+        branch.allRows.every(
+          (row) =>
+            row.editable && row.variant_type === branch.allRows[0].variant_type,
+        );
+      if (eligible) {
+        const groupButton = this._button("groupSettings", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this._groupSettings(path, branch.allRows, this._endpoint());
+        });
+        groupButton.classList.add("groupSettings");
+        summary.append(groupButton);
+      }
+      details.append(summary);
+      const content = element("div", undefined, { class: "hierarchyContent" });
+      const children = [...branch.children.entries()].sort(([a], [b]) =>
+        a.localeCompare(b, undefined, { numeric: true }),
+      );
+      for (const [childLabel, child] of children)
+        content.append(renderBranch(childLabel, child, path));
+      if (branch.rows.length) {
+        const grid = element("div", undefined, {
+          class: this._viewMode === "list" ? "grid list" : "grid",
+        });
+        for (const row of branch.rows.sort((a, b) =>
+          (a.hierarchy_path || a.name).localeCompare(
+            b.hierarchy_path || b.name,
+            undefined,
+            { numeric: true },
+          ),
+        ))
+          grid.append(this._buildCard(row, true));
+        content.append(grid);
+      }
+      details.append(content);
+      return details;
+    };
+    for (const [label, branch] of [...root.children.entries()].sort(
+      ([a], [b]) => a.localeCompare(b, undefined, { numeric: true }),
+    ))
+      this._rows.append(renderBranch(label, branch, ""));
+    if (other.length) {
+      const branch = { children: new Map(), rows: other, count: other.length };
+      this._rows.append(renderBranch(this._t("otherNodes"), branch, ""));
+    }
+  }
   _renderRows() {
     if (!this._rows) return;
     this._rows.replaceChildren();
@@ -1181,9 +1549,19 @@ class OpcuaNodePanel extends HTMLElement {
     const rows = endpoint.rows.filter(
       (r) =>
         (this._filter === "all" || r.platform === this._filter) &&
-        `${r.name} ${r.node_id} ${r.entity_id}`.toLowerCase().includes(query),
+        `${r.name} ${r.hierarchy_path || ""} ${r.node_id} ${r.entity_id}`
+          .toLowerCase()
+          .includes(query),
     );
     if (!rows.length) this._rows.append(emptyMessage(this._t("empty")));
+    if (
+      this._groupMode === "hierarchy" &&
+      endpoint.rows.some((r) => hierarchyParts(r).length)
+    ) {
+      this._renderHierarchy(rows, Boolean(query));
+      this._paintStates();
+      return;
+    }
     // Grouping by array only makes sense browsing everything at once - a
     // platform filter or an active search wants its own flat, precise list -
     // and only when the user has explicitly opted into it over the default
@@ -1888,7 +2266,13 @@ class OpcuaNodePanel extends HTMLElement {
             .includes(unitFilter.value.toLowerCase())
         )
           continue;
-        const item = element("div", option.textContent, {
+        const label =
+          key === "unit" && option.value === "mV"
+            ? "mV · millivolt"
+            : key === "unit" && option.value === "MV"
+              ? "MV · megavolt"
+              : option.textContent;
+        const item = element("div", label, {
           role: "option",
           id: `${key}-option-${unitList.children.length}`,
           "aria-selected": String(option.value === unit.value),
@@ -1966,8 +2350,487 @@ class OpcuaNodePanel extends HTMLElement {
       refresh,
     };
   }
+  _groupSettings(path, rows, endpoint) {
+    if (
+      !rows.length ||
+      rows.some(
+        (row) => !row.editable || row.variant_type !== rows[0].variant_type,
+      )
+    )
+      return;
+    const dialog = element("dialog", undefined, {
+      class: "entityEditor groupEditor",
+    });
+    const form = element("form", undefined, { class: "entityForm" });
+    const heading = element("div", undefined, { class: "editorHeading" });
+    heading.append(
+      element("h2", `${this._t("groupSettings")} · ${path}`),
+      element(
+        "p",
+        `${rows.length} · ${rows[0].variant_type}. ${this._t("groupHelp")}`,
+        { class: "hint" },
+      ),
+    );
+    const body = element("div", undefined, { class: "editorBody" });
+    form.append(heading, body);
+    const section = (key) => {
+      const container = element("section", undefined, {
+        class: "editorSection",
+      });
+      const title = element("h3", this._t(key));
+      title.prepend(
+        valueIcon(
+          {
+            identitySection: "text",
+            valueSection: "datetime",
+            updatesSection: "on",
+          }[key],
+        ),
+      );
+      const grid = element("div", undefined, { class: "editorFields" });
+      container.append(title, grid);
+      body.append(container);
+      return grid;
+    };
+    const membersSection = section("groupMembersSection");
+    membersSection.parentElement.classList.add("groupSelectionSection");
+    const identitySection = section("identitySection");
+    const valueSection = section("valueSection");
+    const updatesSection = section("updatesSection");
+    const members = element("div", undefined, { class: "groupMembers" });
+    const selected = new Map();
+    for (const row of rows) {
+      const check = element("input", undefined, { type: "checkbox" });
+      check.checked = !this._draftBucket(endpoint)?.changes?.[row.key];
+      selected.set(row.key, check);
+      const label = element("label", undefined, { class: "groupMember" });
+      label.append(check, element("span", row.hierarchy_path || row.name));
+      members.append(label);
+    }
+    membersSection.append(members);
+    const controls = {};
+    const optionField = (key, values, sectionGrid, config = {}) => {
+      const wrap = element("div", undefined, {
+        class: "groupField editorFieldGroup",
+      });
+      const mode = element("select", undefined, {
+        "aria-label": `${this._t(key)} · ${this._t("noChange")}`,
+      });
+      mode.append(element("option", this._t("noChange"), { value: "keep" }));
+      mode.append(element("option", this._t("setValue"), { value: "set" }));
+      if (config.clear)
+        mode.append(
+          element("option", this._t("clearValue"), { value: "clear" }),
+        );
+      let input;
+      if (Array.isArray(values)) {
+        input = element("select", undefined, { "aria-label": this._t(key) });
+        for (const [label, value] of values)
+          input.append(element("option", label, { value }));
+      } else {
+        input = element("input", undefined, {
+          type: values,
+          "aria-label": this._t(key),
+          ...(values === "number" ? { step: "any" } : {}),
+        });
+      }
+      const refresh = () => {
+        input.disabled = mode.value !== "set";
+      };
+      mode.addEventListener("change", refresh);
+      refresh();
+      wrap.append(element("span", this._t(key)), mode, input);
+      sectionGrid.append(wrap);
+      controls[key] = { mode, input, wrap, refresh };
+      return controls[key];
+    };
+    const type = rows[0].variant_type;
+    const candidates = [
+      "auto",
+      "sensor",
+      "binary_sensor",
+      "switch",
+      "number",
+      "text",
+      "datetime",
+      "disabled",
+    ].filter(
+      (platform) =>
+        ["auto", "disabled"].includes(platform) ||
+        rows.every((row) => compatible({ platform }, row)),
+    );
+    const category = optionField(
+      "category",
+      candidates.map((value) => [this._t(value), value]),
+      identitySection,
+    );
+    const deviceClass = optionField("deviceClass", [], valueSection, {
+      clear: true,
+    });
+    const classPlatforms = () => {
+      if (category.mode.value === "set") {
+        if (category.input.value !== "auto") return [category.input.value];
+        return [
+          ...new Set(
+            rows.map((row) =>
+              row.writable
+                ? { Boolean: "switch", DateTime: "datetime" }[type] || "sensor"
+                : "sensor",
+            ),
+          ),
+        ];
+      }
+      return [
+        ...new Set(
+          rows
+            .filter((row) => selected.get(row.key).checked)
+            .map((row) => row.settings?.platform || row.platform),
+        ),
+      ];
+    };
+    const updateClasses = () => {
+      const platforms = classPlatforms();
+      const classes = platforms.length
+        ? (this._data.device_classes[platforms[0]] || []).filter((cls) =>
+            platforms.every((platform) =>
+              (this._data.device_classes[platform] || []).includes(cls),
+            ),
+          )
+        : [];
+      const previous = deviceClass.input.value;
+      deviceClass.input.replaceChildren(
+        ...classes.map((cls) =>
+          element(
+            "option",
+            this._hass.localize?.(
+              `component.${platforms[0]}.entity_component.${cls}.name`,
+            ) || cls,
+            { value: cls },
+          ),
+        ),
+      );
+      if (classes.includes(previous)) deviceClass.input.value = previous;
+      deviceClass.mode.querySelector('[value="set"]').disabled =
+        !classes.length;
+      if (!classes.length && deviceClass.mode.value === "set")
+        deviceClass.mode.value = "keep";
+      deviceClass.refresh();
+    };
+    category.mode.addEventListener("change", updateClasses);
+    category.input.addEventListener("change", updateClasses);
+    for (const check of selected.values())
+      check.addEventListener("change", updateClasses);
+    updateClasses();
+    const areas = this._data.areas.map((area) => [area.name, area.id]);
+    if (areas.length)
+      optionField("area", areas, identitySection, { clear: true });
+    if (NUMERIC.has(type)) {
+      const unit = optionField(
+        "unit",
+        [
+          [this._t("none"), ""],
+          ...this._data.units.map((value) => [value, value]),
+          [this._t("unitCustom"), "__custom__"],
+        ],
+        valueSection,
+        { clear: true },
+      );
+      const picker = this._searchPicker(unit.input, "unit", "filterUnits", [
+        "",
+        "__custom__",
+      ]);
+      unit.wrap.append(picker.field);
+      const custom = element("input", undefined, {
+        type: "text",
+        maxlength: "50",
+        "aria-label": this._t("unitCustomLabel"),
+      });
+      custom.placeholder = this._t("unitCustomLabel");
+      unit.wrap.append(custom);
+      const refreshUnit = () => {
+        picker.refresh();
+        custom.hidden =
+          unit.mode.value !== "set" || unit.input.value !== "__custom__";
+        custom.disabled = custom.hidden;
+      };
+      unit.mode.addEventListener("change", () => {
+        unit.refresh();
+        refreshUnit();
+      });
+      unit.input.addEventListener("change", refreshUnit);
+      refreshUnit();
+      controls.unit.custom = custom;
+      optionField("precision", "number", valueSection, { clear: true });
+      optionField("deadband", "number", updatesSection, { clear: true });
+      const conversion = optionField(
+        "conversion",
+        [
+          [this._t("multiplier"), "multiplier"],
+          [this._t("linear_scale"), "linear_scale"],
+        ],
+        valueSection,
+        { clear: true },
+      );
+      const args = element("div", undefined, { class: "groupConversionArgs" });
+      for (const [key, fallback] of Object.entries({
+        factor: 1,
+        plc_min: 0,
+        plc_max: 100,
+        ha_min: 0,
+        ha_max: 100,
+      })) {
+        const input = element("input", undefined, {
+          type: "number",
+          step: "any",
+          "aria-label": this._t(key),
+        });
+        input.value = fallback;
+        args.append(this._field(key, input));
+        controls[key] = { input };
+      }
+      conversion.input.parentElement.append(args);
+      const refreshConversion = () => {
+        args.hidden = conversion.mode.value !== "set";
+        for (const field of args.children) {
+          field.hidden =
+            args.hidden ||
+            (conversion.input.value === "multiplier") !==
+              (field === args.firstElementChild);
+        }
+      };
+      conversion.mode.addEventListener("change", refreshConversion);
+      conversion.input.addEventListener("change", refreshConversion);
+      refreshConversion();
+      const limits = element("div", undefined, { class: "groupLimits" });
+      for (const [key, fallback] of Object.entries({
+        min: 0,
+        max: 100,
+        step: 1,
+      })) {
+        const input = element("input", undefined, {
+          type: "number",
+          step: "any",
+          "aria-label": this._t(key),
+        });
+        input.value = fallback;
+        limits.append(this._field(key, input));
+        controls[key] = { input };
+      }
+      const limitMode = optionField(
+        "limitsHelp",
+        [[this._t("setValue"), "set"]],
+        valueSection,
+      );
+      limitMode.input.parentElement.append(limits);
+      const refreshLimits = () => {
+        limits.hidden = limitMode.mode.value !== "set";
+      };
+      limitMode.mode.addEventListener("change", refreshLimits);
+      refreshLimits();
+    }
+    if (type === "String") {
+      const limitMode = optionField(
+        "limitsHelp",
+        [[this._t("setValue"), "set"]],
+        valueSection,
+      );
+      const limits = element("div", undefined, { class: "groupLimits" });
+      for (const [key, fallback] of Object.entries({
+        min_length: 0,
+        max_length: 255,
+      })) {
+        const input = element("input", undefined, {
+          type: "number",
+          min: "0",
+          max: "255",
+          step: "1",
+          "aria-label": this._t(key),
+        });
+        input.value = fallback;
+        limits.append(this._field(key, input));
+        controls[key] = { input };
+      }
+      limitMode.input.parentElement.append(limits);
+      const refreshLimits = () => {
+        limits.hidden = limitMode.mode.value !== "set";
+      };
+      limitMode.mode.addEventListener("change", refreshLimits);
+      refreshLimits();
+    }
+    optionField(
+      "updateMode",
+      [
+        [this._t("polling"), "polling"],
+        [this._t("subscription"), "subscription"],
+      ],
+      updatesSection,
+    );
+    optionField(
+      "alwaysAvailable",
+      [
+        [this._t("on"), "true"],
+        [this._t("off"), "false"],
+      ],
+      updatesSection,
+    );
+    if (type === "Boolean")
+      optionField(
+        "invert",
+        [
+          [this._t("on"), "true"],
+          [this._t("off"), "false"],
+        ],
+        valueSection,
+      );
+    if (!valueSection.children.length) valueSection.parentElement.hidden = true;
+    const error = element("p", "", { class: "error", role: "alert" });
+    const footer = element("footer");
+    const cancel = this._button("cancel", () => dialog.close());
+    const stage = element("button", this._t("stage"), {
+      type: "submit",
+      class: "primary",
+    });
+    footer.append(error, cancel, stage);
+    form.append(footer);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      try {
+        const chosen = rows.filter((row) => selected.get(row.key).checked);
+        if (!chosen.length) throw new Error("invalid_group");
+        const bucket = this._draftBucket(endpoint);
+        if (bucket && bucket.revision !== endpoint.revision)
+          throw new Error("staleDraft");
+        const mode = (key) => controls[key]?.mode.value || "keep";
+        const value = (key) =>
+          key === "unit" && controls.unit?.input.value === "__custom__"
+            ? controls.unit.custom.value
+            : controls[key]?.input.value;
+        if (
+          mode("unit") === "set" &&
+          (value("unit").length > 50 ||
+            (controls.unit.input.value === "__custom__" &&
+              !value("unit").trim()))
+        )
+          throw new Error("invalid_unit");
+        const number = (key) => {
+          if (value(key) === "" || !Number.isFinite(Number(value(key))))
+            throw new Error("invalid_group");
+          return Number(value(key));
+        };
+        const changes = {};
+        for (const row of chosen) {
+          const payload = {
+            ...(bucket?.changes?.[row.key] || {
+              key: row.key,
+              platform: row.settings?.platform || row.platform,
+              name: row.custom_name || "",
+              area_id: row.area_id || null,
+              node_id: row.node_id,
+              device_class: row.device_class || null,
+              invert_state: Boolean(row.invert_state),
+            }),
+          };
+          if (mode("category") === "set") {
+            payload.platform = value("category");
+            if (
+              payload.platform !== row.platform &&
+              mode("deviceClass") === "keep"
+            )
+              payload.device_class = null;
+          }
+          if (mode("deviceClass") !== "keep")
+            payload.device_class =
+              mode("deviceClass") === "clear" ? null : value("deviceClass");
+          if (mode("area") !== "keep")
+            payload.area_id = mode("area") === "clear" ? null : value("area");
+          for (const [field, key] of [
+            ["unit_of_measurement", "unit"],
+            ["precision", "precision"],
+            ["deadband", "deadband"],
+          ]) {
+            if (mode(key) === "clear") payload[field] = null;
+            else if (mode(key) === "set")
+              payload[field] =
+                key === "unit" ? value(key).trim() || null : number(key);
+          }
+          if (mode("conversion") === "clear") payload.conversion = null;
+          else if (mode("conversion") === "set") {
+            const kind = value("conversion");
+            payload.conversion =
+              kind === "multiplier"
+                ? { type: kind, factor: number("factor") }
+                : {
+                    type: kind,
+                    plc_min: number("plc_min"),
+                    plc_max: number("plc_max"),
+                    ha_min: number("ha_min"),
+                    ha_max: number("ha_max"),
+                  };
+          }
+          if (mode("limitsHelp") === "set") {
+            payload.limits =
+              type === "String"
+                ? {
+                    min_length: number("min_length"),
+                    max_length: number("max_length"),
+                  }
+                : {
+                    min: number("min"),
+                    max: number("max"),
+                    step: number("step"),
+                  };
+          }
+          if (mode("updateMode") === "set")
+            payload.update_mode = value("updateMode");
+          if (mode("alwaysAvailable") === "set")
+            payload.always_available = value("alwaysAvailable") === "true";
+          if (mode("invert") === "set")
+            payload.invert_state = value("invert") === "true";
+          changes[row.key] = payload;
+        }
+        if (
+          Object.values(controls).every(
+            (control) => !control.mode || control.mode.value === "keep",
+          )
+        )
+          throw new Error("invalid_group");
+        this._drafts[endpoint.entry_id] = {
+          revision: endpoint.revision,
+          changes: { ...(bucket?.changes || {}), ...changes },
+        };
+        this._persistDrafts();
+        this._notice = this._t("staged");
+        dialog.close();
+        this._render();
+      } catch (err) {
+        error.textContent = this._t(
+          err.message in TEXT.en ? err.message : "invalid_group",
+        );
+      }
+    });
+    dialog.append(form);
+    dialog.addEventListener("close", () => dialog.remove());
+    this.shadowRoot.append(dialog);
+    dialog.showModal();
+  }
   _edit(row, manual = null, endpoint = this._endpoint()) {
     row = { ...row };
+    const pending = !manual && this._draftBucket(endpoint)?.changes?.[row.key];
+    if (pending)
+      row = {
+        ...row,
+        platform: pending.platform,
+        custom_name: pending.name,
+        area_id: pending.area_id,
+        node_id: pending.node_id,
+        device_class: pending.device_class,
+        invert_state: pending.invert_state,
+        settings: {
+          ...row.settings,
+          ...pending,
+          ...(pending.limits || {}),
+        },
+      };
     const revision = endpoint.revision;
     const dialog = element("dialog", undefined, {
       class: "entityEditor",
@@ -2000,7 +2863,9 @@ class OpcuaNodePanel extends HTMLElement {
         "data-platform": row.platform,
         "data-value-type": valueType(row),
       });
-      preview.append(this._buildCard(row).querySelector(".entityState"));
+      preview.append(
+        this._buildCard(row, false, false).querySelector(".entityState"),
+      );
       heading.append(preview);
     }
     form.prepend(heading);
@@ -2457,11 +3322,19 @@ class OpcuaNodePanel extends HTMLElement {
     const error = element("div", "", { class: "error", role: "alert" });
     const footer = element("footer");
     const cancel = this._button("cancel", () => dialog.close());
-    const save = element("button", this._t("save"), {
+    const save = element("button", this._t(manual ? "save" : "stage"), {
       type: "submit",
       class: "primary",
     });
-    footer.append(error, cancel, save);
+    const immediate = manual
+      ? null
+      : element("button", this._t("save"), {
+          type: "submit",
+          title: this._t("reloading"),
+        });
+    footer.append(error, cancel);
+    if (immediate) footer.append(immediate);
+    footer.append(save);
     form.append(footer);
     let saving = false;
     dialog.addEventListener("cancel", (event) => {
@@ -2479,8 +3352,7 @@ class OpcuaNodePanel extends HTMLElement {
       save.textContent = this._t("saving");
       error.textContent = "";
       try {
-        const result = await this._hass.callWS({
-          type: `ha_opcua/entity/${manual ? "create" : "update"}`,
+        const payload = {
           entry_id: endpoint.entry_id,
           revision,
           ...(manual ? {} : { key: row.key }),
@@ -2541,7 +3413,29 @@ class OpcuaNodePanel extends HTMLElement {
           node_id: nodes.value,
           device_class: !classField.hidden ? deviceClass.value || null : null,
           invert_state: !toggle.hidden && invert.checked,
+        };
+        if (!manual && event.submitter !== immediate) {
+          delete payload.entry_id;
+          delete payload.revision;
+          if (
+            this._draftBucket(endpoint)?.revision !== undefined &&
+            this._draftBucket(endpoint).revision !== endpoint.revision
+          )
+            throw new Error("staleDraft");
+          dialog.close();
+          this._stage(endpoint, payload);
+          return;
+        }
+        const result = await this._hass.callWS({
+          type: manual ? "ha_opcua/entity/create" : "ha_opcua/entity/update",
+          ...payload,
         });
+        if (!manual && this._draftBucket(endpoint)?.changes?.[row.key]) {
+          delete this._draftBucket(endpoint).changes[row.key];
+          if (!Object.keys(this._draftBucket(endpoint).changes).length)
+            delete this._drafts[endpoint.entry_id];
+          this._persistDrafts();
+        }
         this._notice = this._t(result.reload ? "reloading" : "saved");
         dialog.close();
         await this._load();
@@ -2554,7 +3448,7 @@ class OpcuaNodePanel extends HTMLElement {
       } finally {
         saving = false;
         save.disabled = cancel.disabled = false;
-        save.textContent = this._t("save");
+        save.textContent = this._t(manual ? "save" : "stage");
       }
     });
     this.shadowRoot.append(dialog);
