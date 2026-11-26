@@ -21,6 +21,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .arrays import array_element_name, disambiguated_name, parse_array_element
+from .names import full_hierarchy_name, join_hierarchy
 from .const import (
     CONF_CONNECTION_ENABLED,
     CONF_HUB_ID,
@@ -135,6 +136,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_refresh()
         hass.data[DOMAIN][hub_id] = coordinator
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        coordinator.sync_registry_names()
         # Only now is it safe for the coordinator to persist newly discovered
         # nodes (which can trigger a config entry reload): forwarding entry
         # setups above must finish first, or that reload races the still
@@ -438,16 +440,20 @@ class OpcuaHub:
         visited = set()
         self.discovery_complete = True
 
-        async def visit(node):
+        async def visit(node, parent_path=()):
             node_id = node.nodeid.to_string()
             if node_id in visited:
                 return
             visited.add(node_id)
             node_class = await node.read_node_class()
             name = (await node.read_browse_name()).Name
+            path = (*parent_path, name)
             if node_class == ua.NodeClass.Variable:
                 try:
-                    discovered.append(await self._read_node_metadata(node, name))
+                    metadata = await self._read_node_metadata(node, name)
+                    metadata["browse_path"] = join_hierarchy(path)
+                    metadata["browse_segments"] = list(path)
+                    discovered.append(metadata)
                 except ValueError:
                     _LOGGER.debug("Skipping unsupported value on node %s", node_id)
                 except ua.UaStatusCodeError as err:
@@ -477,7 +483,7 @@ class OpcuaHub:
             ):
                 for child in await node.get_children():
                     try:
-                        await visit(child)
+                        await visit(child, path)
                     except ua.UaStatusCodeError as err:
                         if _connection_error(err):
                             raise
@@ -1010,6 +1016,11 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
                 "node_id": node_id,
                 "target_node_id": target_id,
             }
+            node["full_name"] = (
+                (target or original).get("browse_path")
+                or full_hierarchy_name(target_id, original["name"])
+            )
+            node["browse_segments"] = (target or original).get("browse_segments")
             self.nodes[node_id] = node
             # A brand-new writable numeric/string node defaults to an editable
             # control instead of the usual conservative read-only sensor. A
@@ -1086,6 +1097,8 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
                     self.node_settings[node_id] = settings
                     self._pending_node_settings[node_id] = settings
         self._reconcile_legacy_array_display_names()
+        if self.entities_ready:
+            self.sync_registry_names()
         seen_ids = set(candidates)
         # persist=False here means this pass is fundamentally not eligible to
         # ever become the discovery baseline (see the cache-only seed call in
@@ -1097,6 +1110,24 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
         if persist:
             self._last_discovery_snapshot = (seen_ids, full_discovery)
             self._persist_discovery_state(seen_ids, full_discovery=full_discovery)
+
+    def sync_registry_names(self):
+        """Replace old automatic leaf names without changing entity IDs or custom names."""
+        if not self.hass or not self.config_entry:
+            return
+        registry = er.async_get(self.hass)
+        prefix = f"{self.config_entry.entry_id}:"
+        for entity in er.async_entries_for_config_entry(
+            registry, self.config_entry.entry_id
+        ):
+            if entity.platform != DOMAIN or not entity.unique_id.startswith(prefix):
+                continue
+            node = self.nodes.get(entity.unique_id[len(prefix) :])
+            if node is None or entity.name is not None:
+                continue
+            full_name = node["full_name"]
+            if full_name != entity.original_name:
+                registry.async_update_entity(entity.entity_id, name=full_name)
 
     def _reconcile_legacy_array_display_names(self):
         """Backfill display_name for array fields renamed before it existed.

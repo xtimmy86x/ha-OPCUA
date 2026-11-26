@@ -22,6 +22,7 @@ from custom_components.ha_opcua.config_flow import AsyncUAOptionsFlow
 from custom_components.ha_opcua.const import CONF_NODE_SETTINGS, DOMAIN
 from custom_components.ha_opcua.number import AsyncuaNumber
 from custom_components.ha_opcua.panel import (
+    async_batch_save_entities,
     async_save_entity,
     async_setup_panel,
     endpoint_snapshot,
@@ -121,6 +122,38 @@ async def test_invalid_save_is_atomic(hass, entry, changes, error):
         await async_save_entity(hass, {**msg, **changes})
     assert dict(entry.options) == before
     assert er.async_get(hass).async_get(registered.entity_id) == registered
+    await c.async_shutdown()
+
+
+async def test_batch_validates_all_before_changing_options_or_registry(hass, entry):
+    c, registered, first = await prepare(hass, entry)
+    second = {
+        **first,
+        "key": "ns=2;i=2",
+        "node_id": "ns=2;i=2",
+        "name": "Alternate pump",
+        "invert_state": False,
+        "platform": "switch",
+    }
+    before = deepcopy(dict(entry.options))
+    with pytest.raises(ValueError, match="node_not_found"):
+        await async_batch_save_entities(hass, {
+            "entry_id": entry.entry_id,
+            "revision": first["revision"],
+            "changes": [first, {**second, "node_id": "ns=2;i=99"}],
+        })
+    assert dict(entry.options) == before
+    assert er.async_get(hass).async_get(registered.entity_id) == registered
+    with patch.object(hass.config_entries, "async_update_entry", wraps=hass.config_entries.async_update_entry) as update:
+        result = await async_batch_save_entities(hass, {
+            "entry_id": entry.entry_id,
+            "revision": first["revision"],
+            "changes": [first, second],
+        })
+        assert update.call_count == 1
+    assert result["count"] == 2
+    assert set(result["entity_ids"]) == {first["key"], second["key"]}
+    assert set(entry.options[CONF_NODE_SETTINGS]) >= {first["key"], second["key"]}
     await c.async_shutdown()
 
 

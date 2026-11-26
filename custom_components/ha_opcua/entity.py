@@ -102,9 +102,7 @@ class OpcuaEntity(CoordinatorEntity[AsyncuaCoordinator], RestoreEntity):
     def _handle_coordinator_update(self):
         self._settings = self.coordinator.node_settings.get(self._node_id, {})
         self._attr_device_class = self._settings.get("device_class")
-        self._attr_name = self._settings.get(
-            "display_name", self.coordinator.nodes[self._node_id]["name"]
-        )
+        self._attr_name = self.coordinator.nodes[self._node_id]["full_name"]
         self._capture_value()
         super()._handle_coordinator_update()
 
@@ -205,7 +203,7 @@ def async_setup_node_entities(
             if node_id not in added:
                 added.add(node_id)
                 entities.append(
-                    entity_class(coordinator, node["name"], node_id, entry.entry_id)
+                    entity_class(coordinator, node["full_name"], node_id, entry.entry_id)
                 )
         if entities:
             async_add_entities(entities)

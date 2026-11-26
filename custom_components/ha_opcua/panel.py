@@ -84,6 +84,7 @@ async def async_setup_panel(hass):
     )
     websocket_api.async_register_command(hass, ws_snapshot)
     websocket_api.async_register_command(hass, ws_save)
+    websocket_api.async_register_command(hass, ws_batch_save)
     websocket_api.async_register_command(hass, ws_inspect)
     websocket_api.async_register_command(hass, ws_create)
     websocket_api.async_register_command(hass, ws_remove)
@@ -164,11 +165,8 @@ def endpoint_snapshot(hass, entry):
             )
             entity_id = registered.entity_id if registered else None
         node_id = node.get("target_node_id", settings.get("node_id", key))
-        name = (
-            (registered.name or registered.original_name)
-            if registered
-            else node["name"]
-        )
+        hierarchy_path = node.get("full_name") or node["name"]
+        name = (registered.name or hierarchy_path) if registered else hierarchy_path
         custom_name = registered.name if registered else None
         parsed_array = parse_array_element(node_id)
         proposed_name = disambiguated_name(
@@ -183,6 +181,8 @@ def endpoint_snapshot(hass, entry):
                 "entity_id": entity_id,
                 "platform": platform,
                 "name": name,
+                "hierarchy_path": hierarchy_path,
+                "hierarchy_segments": node.get("browse_segments"),
                 "custom_name": custom_name,
                 "area_id": registered.area_id if registered else None,
                 "node_id": node_id,
@@ -197,6 +197,7 @@ def endpoint_snapshot(hass, entry):
                 "proposed_name": proposed_name,
                 "renamable": renamable,
                 "variant_type": node["variant_type"],
+                "writable": bool(node.get("writable")),
                 "device_class": (
                     (registered.device_class or settings.get("device_class"))
                     if registered
@@ -235,10 +236,13 @@ def endpoint_snapshot(hass, entry):
                 "entity_id": entity.entity_id,
                 "platform": entity.domain,
                 "name": entity.name or entity.original_name or entity.entity_id,
+                "hierarchy_path": cached.get("browse_path") or cached.get("name"),
+                "hierarchy_segments": cached.get("browse_segments"),
                 "custom_name": entity.name,
                 "area_id": entity.area_id,
                 "node_id": settings.get("node_id", key),
                 "variant_type": cached.get("variant_type"),
+                "writable": bool(cached.get("writable")),
                 "device_class": entity.device_class or settings.get("device_class"),
                 "invert_state": settings.get("invert_state", False),
                 "editable": False,
@@ -430,6 +434,89 @@ async def async_save_entity(hass, msg):
             "saved": True,
             "reload": reload_needed,
             "entity_id": selected_entity_id,
+        }
+
+
+async def async_batch_save_entities(hass, msg):
+    """Validate every edit before applying one options update to the endpoint."""
+    entry = hass.config_entries.async_get_entry(msg["entry_id"])
+    if entry is None or entry.domain != DOMAIN:
+        raise ValueError("endpoint_not_found")
+    changes = msg["changes"]
+    if not changes or len(changes) > 1000:
+        raise ValueError("invalid_batch")
+    keys = [change["key"] for change in changes]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate_entity")
+    lock = hass.data.setdefault(PANEL_DATA, {"locks": {}})["locks"].setdefault(
+        entry.entry_id, asyncio.Lock()
+    )
+    async with lock:
+        snapshot = endpoint_snapshot(hass, entry)
+        if snapshot["revision"] != msg["revision"]:
+            raise ValueError("stale_configuration")
+        c = _coordinator(hass, entry)
+        if c is None:
+            raise ValueError("endpoint_not_loaded")
+        rows = {row["key"]: row for row in snapshot["rows"]}
+        available = _panel_nodes(c)
+        areas = ar.async_get(hass)
+        prepared = []
+        options = deepcopy(dict(entry.options))
+        for change in changes:
+            key = change["key"]
+            row = rows.get(key)
+            if row is None or not row["editable"]:
+                raise ValueError("entity_not_ready")
+            target = available.get(change["node_id"])
+            if target is None:
+                raise ValueError("node_not_found")
+            saved = entry.options.get(CONF_NODE_SETTINGS, {}).get(key, {})
+            if (
+                "platform" not in change
+                and effective_platform(target, saved) != row["platform"]
+            ):
+                raise ValueError("incompatible_platform")
+            settings = _entity_settings(target, change, saved)
+            area_id = change["area_id"]
+            if area_id is not None and areas.async_get_area(area_id) is None:
+                raise ValueError("area_not_found")
+            name = change["name"].strip() or None
+            if name is not None and len(name) > 255:
+                raise ValueError("invalid_name")
+            platform = effective_platform(target, settings)
+            options.setdefault(CONF_NODE_SETTINGS, {})[key] = settings
+            update_offline_node(options, key, target, settings)
+            prepared.append((key, row, target, platform, name, area_id))
+        registry = er.async_get(hass)
+        related_entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+        entity_ids = {}
+        for key, row, _target, platform, name, area_id in prepared:
+            unique_id = f"{entry.entry_id}:{key}"
+            related = [
+                e for e in related_entries
+                if e.platform == DOMAIN and e.unique_id == unique_id
+            ]
+            entity_ids[key] = _migrate_entity_registry(
+                hass, entry, c.nodes[key], key, platform, related,
+                name=name, area_id=area_id,
+                suggested_object_id=(
+                    row["entity_id"].split(".", 1)[1]
+                    if row["entity_id"] else name or row["name"]
+                ),
+            )
+            if platform != row["platform"]:
+                c._platforms[key] = "disabled"
+        changed = options != dict(entry.options)
+        reload_needed = changed and c.live_entity_options(options) is None
+        if changed:
+            if not reload_needed:
+                c.apply_entity_options(options)
+            hass.config_entries.async_update_entry(entry, options=options)
+        async_sync_orphan_repairs(hass, entry)
+        return {
+            "saved": True, "reload": reload_needed,
+            "entity_ids": entity_ids, "count": len(prepared),
         }
 
 
@@ -1021,6 +1108,45 @@ async def ws_snapshot(hass, connection, msg):
 async def ws_save(hass, connection, msg):
     try:
         result = await async_save_entity(hass, msg)
+    except ValueError as err:
+        connection.send_error(msg["id"], str(err), str(err))
+    else:
+        connection.send_result(msg["id"], result)
+
+
+BATCH_CHANGE_SCHEMA = vol.Schema(
+    {
+        vol.Required("key"): str,
+        vol.Optional("platform"): str,
+        vol.Optional("limits"): dict,
+        vol.Optional("conversion"): vol.Any(dict, None),
+        vol.Optional("precision"): vol.Any(int, None),
+        vol.Optional("deadband"): vol.Any(int, float, None),
+        vol.Optional("always_available"): bool,
+        vol.Optional("update_mode"): vol.In(("polling", "subscription")),
+        vol.Optional("unit_of_measurement"): vol.Any(str, None),
+        vol.Required("name"): str,
+        vol.Required("area_id"): vol.Any(str, None),
+        vol.Required("node_id"): str,
+        vol.Required("device_class"): vol.Any(str, None),
+        vol.Required("invert_state"): bool,
+    }
+)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/entities/batch_update",
+        vol.Required("entry_id"): str,
+        vol.Required("revision"): str,
+        vol.Required("changes"): [BATCH_CHANGE_SCHEMA],
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_batch_save(hass, connection, msg):
+    try:
+        result = await async_batch_save_entities(hass, msg)
     except ValueError as err:
         connection.send_error(msg["id"], str(err), str(err))
     else:

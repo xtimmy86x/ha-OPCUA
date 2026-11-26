@@ -253,6 +253,30 @@ async function pageFor(width = 1280, admin = true) {
           endpoint.revision = "renamed";
           return { renamed };
         }
+        if (msg.type.endsWith("/batch_update")) {
+          if (window.failSave) throw { code: "stale_configuration" };
+          const endpoint = window.fixture.endpoints.find(
+            (e) => e.entry_id === msg.entry_id,
+          );
+          for (const change of msg.changes) {
+            const row = endpoint.rows.find((r) => r.key === change.key);
+            Object.assign(row, {
+              platform:
+                change.platform === "auto" ? row.platform : change.platform,
+              custom_name: change.name || null,
+              area_id: change.area_id,
+              device_class: change.device_class,
+              invert_state: change.invert_state,
+              settings: {
+                ...(row.settings || {}),
+                ...change,
+                ...(change.limits || {}),
+              },
+            });
+          }
+          endpoint.revision = "batch-saved";
+          return { saved: true, reload: false, count: msg.changes.length };
+        }
         if (window.failSave) throw { code: "stale_configuration" };
         const endpoint = window.fixture.endpoints.find(
           (e) => e.entry_id === msg.entry_id,
@@ -321,7 +345,7 @@ test("desktop categories, search, endpoint selection and safe text rendering", a
   );
   assert.equal(
     await page.locator(".panelVersion").textContent(),
-    "Pannello 1.9.2",
+    "Pannello 1.11.2",
   );
   assert.equal(
     await page.getByRole("button", { name: "Menu", exact: true }).count(),
@@ -1023,8 +1047,7 @@ test("array-of-struct fields are grouped and can be renamed selectively", async 
     pressed: await locator.getAttribute("aria-pressed"),
   });
 
-  // Category grouping is the default - even on "All", array fields stay
-  // scattered under their own platform headings until the user opts in.
+  // Without hierarchy metadata, category grouping remains the useful fallback.
   assert.equal(await page.locator(".arrayGroup").count(), 0);
   assert.equal(
     await page.locator("article").filter({ hasText: "astMeldungen" }).count(),
@@ -1490,6 +1513,253 @@ for (const width of [1280, 390]) {
     await page.close();
   });
 }
+
+test("hierarchy groups PLC paths, shows leaf names and expands search results", async () => {
+  const page = await pageFor(1280);
+  await page.evaluate(() => {
+    const rows = window.fixture.endpoints[0].rows;
+    const paths = [
+      "HA_DATA.Battery1.BalanceStateArr[1]",
+      "HA_DATA.Battery1.BalanceStateArr[2]",
+      "HA_DATA.Battery1.Power",
+      "HA_DATA.Battery2.Power",
+    ];
+    rows.forEach((row, index) => {
+      row.name = paths[index];
+      row.hierarchy_path = paths[index];
+    });
+  });
+  await page.getByRole("button", { name: "Aggiorna", exact: true }).click();
+  const branch = page.locator(
+    '.hierarchyBranch[data-path="/HA_DATA.Battery1"]',
+  );
+  assert.equal(await branch.count(), 1);
+  assert.equal(await branch.getAttribute("open"), null);
+  assert.equal(
+    await branch.locator(":scope > summary").textContent(),
+    "HA_DATA.Battery1 · 3",
+  );
+  await branch.locator(":scope > summary").click();
+  const array = page.locator(
+    '.hierarchyBranch[data-path="/HA_DATA.Battery1/BalanceStateArr"]',
+  );
+  assert.equal(await array.getAttribute("open"), null);
+  await array.locator(":scope > summary").click();
+  assert.deepEqual(await array.locator("article h3").allTextContents(), [
+    "HA_DATA.Battery1.BalanceStateArr[1]",
+    "HA_DATA.Battery1.BalanceStateArr[2]",
+  ]);
+  assert.equal(
+    await branch
+      .locator("article h3")
+      .getByText("HA_DATA.Battery1.Power")
+      .count(),
+    1,
+  );
+  await page
+    .getByRole("searchbox", { name: "Cerca nome o NodeId", exact: true })
+    .fill("BalanceStateArr[2]");
+  assert.equal(await page.locator(".hierarchyBranch[open]").count(), 2);
+  assert.deepEqual(await page.locator("article h3").allTextContents(), [
+    "HA_DATA.Battery1.BalanceStateArr[2]",
+  ]);
+  await page
+    .getByRole("searchbox", { name: "Cerca nome o NodeId", exact: true })
+    .fill("");
+  await page.getByRole("button", { name: "Switch · 1", exact: true }).click();
+  assert.equal(
+    await page
+      .locator('.hierarchyBranch[data-path="/HA_DATA.Battery1"] summary')
+      .first()
+      .textContent(),
+    "HA_DATA.Battery1 · 1",
+  );
+  await page.setViewportSize({ width: 390, height: 900 });
+  assert.equal(
+    await page.evaluate(() => {
+      const content = document
+        .querySelector("opcua-node-panel")
+        .shadowRoot.querySelector(".content");
+      return content.scrollWidth > content.clientWidth;
+    }),
+    false,
+  );
+  await page.close();
+});
+
+test("same-type folder stages selected members and one batch saves all drafts", async () => {
+  const page = await pageFor();
+  await page.evaluate(() => {
+    const rows = window.fixture.endpoints[0].rows;
+    const paths = [
+      "HA_DATA.Battery1.Switches.Run",
+      "HA_DATA.Battery1.Switches.Door",
+      "HA_DATA.Battery1.Power",
+      "HA_DATA.Battery2.Recipe",
+    ];
+    rows.forEach((row, index) => {
+      row.hierarchy_path = paths[index];
+      row.name = paths[index];
+      row.writable = index !== 2;
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (value) => {
+          window.copiedName = value;
+        },
+      },
+    });
+  });
+  await page.getByRole("button", { name: "Aggiorna", exact: true }).click();
+  const battery = page.locator(
+    '.hierarchyBranch[data-path="/HA_DATA.Battery1"]',
+  );
+  assert.equal(
+    await battery.locator(":scope > summary .groupSettings").count(),
+    0,
+  );
+  await battery.locator(":scope > summary").click();
+  const switches = page.locator(
+    '.hierarchyBranch[data-path="/HA_DATA.Battery1/Switches"]',
+  );
+  await switches.locator(":scope > summary").click();
+  assert.deepEqual(await switches.locator("article h3").allTextContents(), [
+    "HA_DATA.Battery1.Switches.Door",
+    "HA_DATA.Battery1.Switches.Run",
+  ]);
+  await switches
+    .locator("article")
+    .filter({ hasText: "Switches.Run" })
+    .getByRole("button", { name: "Copia nome completo" })
+    .click();
+  assert.equal(
+    await page.evaluate(() => window.copiedName),
+    "HA_DATA.Battery1.Switches.Run",
+  );
+  await switches.getByRole("button", { name: "Impostazioni gruppo" }).click();
+  const groupDialog = page.locator("dialog.groupEditor");
+  await groupDialog
+    .locator(".groupMember")
+    .filter({ hasText: "Switches.Door" })
+    .locator("input")
+    .uncheck();
+  const category = groupDialog.locator(".groupField").first();
+  await category.locator("select").first().selectOption("set");
+  await category.locator("select").nth(1).selectOption("sensor");
+  await groupDialog
+    .getByRole("button", { name: "Aggiungi alle modifiche" })
+    .click();
+  assert.equal(
+    await page.evaluate(
+      () => window.calls.filter((c) => c.type.endsWith("/batch_update")).length,
+    ),
+    0,
+  );
+  await battery
+    .locator("article")
+    .filter({ hasText: "Battery1.Power" })
+    .getByRole("button", { name: "Modifica" })
+    .click();
+  await page
+    .locator("dialog.entityEditor")
+    .getByLabel("Nome", { exact: true })
+    .fill("Power alias");
+  await page
+    .locator("dialog.entityEditor")
+    .getByRole("button", { name: "Aggiungi alle modifiche" })
+    .click();
+  await page
+    .getByRole("button", { name: "Salva tutte le modifiche (2)" })
+    .click();
+  const review = page.locator("dialog");
+  assert.equal(await review.locator(".draftReviewItem").count(), 2);
+  assert.equal(
+    (
+      await review.locator(".draftReviewItem code").first().textContent()
+    ).includes('"node_id"'),
+    false,
+  );
+  await review
+    .getByRole("button", { name: "Salva tutte le modifiche" })
+    .click();
+  const batches = await page.evaluate(() =>
+    window.calls.filter((c) => c.type.endsWith("/batch_update")),
+  );
+  assert.equal(batches.length, 1);
+  assert.deepEqual(batches[0].changes.map((c) => c.key).sort(), [
+    "ns=4;i=1",
+    "ns=4;i=3",
+  ]);
+  assert.equal(
+    batches[0].changes.find((c) => c.key === "ns=4;i=1").platform,
+    "sensor",
+  );
+  assert.equal(
+    batches[0].changes.find((c) => c.key === "ns=4;i=3").name,
+    "Power alias",
+  );
+  await page.close();
+});
+
+test("group editor mirrors entity sections, localizes classes and offers standard or custom units", async () => {
+  const page = await pageFor(390);
+  await page.evaluate(() => {
+    const endpoint = window.fixture.endpoints[0];
+    endpoint.rows.slice(0, 2).forEach((row, index) => {
+      row.name = `HA_DATA.Battery1.CellVoltageArr[${index + 1}]`;
+      row.hierarchy_path = row.name;
+      row.variant_type = "Float";
+      row.platform = "sensor";
+      row.writable = false;
+      endpoint.nodes[index].variant_type = "Float";
+      endpoint.nodes[index].writable = false;
+    });
+    window.testHass.language = "zh-Hans";
+    window.testHass.localize = (key) =>
+      key === "component.sensor.entity_component.temperature.name"
+        ? "温度"
+        : "";
+    document.querySelector("opcua-node-panel").hass = { ...window.testHass };
+  });
+  await page.getByRole("button", { name: "Aggiorna" }).click();
+  const group = page.locator(
+    '.hierarchyBranch[data-path="/HA_DATA.Battery1/CellVoltageArr"]',
+  );
+  await page
+    .locator('.hierarchyBranch[data-path="/HA_DATA.Battery1"] > summary')
+    .click();
+  await group.getByRole("button", { name: "Group settings" }).click();
+  const dialog = page.locator("dialog.groupEditor");
+  assert.equal(await dialog.locator(".editorSection:visible").count(), 4);
+  assert.equal(await dialog.locator(".editorBody").count(), 1);
+  const deviceClass = dialog.getByRole("combobox", {
+    name: "Device class",
+    exact: true,
+  });
+  assert.equal(
+    await deviceClass.locator('option[value="temperature"]').textContent(),
+    "温度",
+  );
+  const unitMode = dialog.getByRole("combobox", {
+    name: "Unit of measurement · No change",
+  });
+  await unitMode.selectOption("set");
+  const trigger = dialog.getByRole("button", { name: "Unit of measurement" });
+  await trigger.click();
+  await dialog.getByRole("combobox", { name: "Search units…" }).fill("kwh");
+  await dialog.getByRole("option", { name: "kWh" }).click();
+  assert.equal(await trigger.textContent(), "kWh");
+  await trigger.click();
+  await dialog.getByRole("option", { name: "Custom…" }).click();
+  await dialog.getByRole("textbox", { name: "Custom unit" }).fill("mV/cell");
+  await dialog.getByRole("button", { name: "Add to pending changes" }).click();
+  const staged = await page.evaluate(
+    () => document.querySelector("opcua-node-panel")._drafts,
+  );
+  assert.match(JSON.stringify(staged), /mV\/cell/);
+  await page.close();
+});
 
 for (const width of [1280, 390]) {
   test(`unit picker keyboard interaction and editor sections at ${width}px`, async () => {
