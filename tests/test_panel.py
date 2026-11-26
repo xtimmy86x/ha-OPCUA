@@ -22,6 +22,7 @@ from custom_components.ha_opcua.config_flow import AsyncUAOptionsFlow
 from custom_components.ha_opcua.const import CONF_NODE_SETTINGS, DOMAIN
 from custom_components.ha_opcua.number import AsyncuaNumber
 from custom_components.ha_opcua.panel import (
+    _sync_sensor_display_unit,
     async_batch_save_entities,
     async_save_entity,
     async_setup_panel,
@@ -137,19 +138,29 @@ async def test_batch_validates_all_before_changing_options_or_registry(hass, ent
     }
     before = deepcopy(dict(entry.options))
     with pytest.raises(ValueError, match="node_not_found"):
-        await async_batch_save_entities(hass, {
-            "entry_id": entry.entry_id,
-            "revision": first["revision"],
-            "changes": [first, {**second, "node_id": "ns=2;i=99"}],
-        })
+        await async_batch_save_entities(
+            hass,
+            {
+                "entry_id": entry.entry_id,
+                "revision": first["revision"],
+                "changes": [first, {**second, "node_id": "ns=2;i=99"}],
+            },
+        )
     assert dict(entry.options) == before
     assert er.async_get(hass).async_get(registered.entity_id) == registered
-    with patch.object(hass.config_entries, "async_update_entry", wraps=hass.config_entries.async_update_entry) as update:
-        result = await async_batch_save_entities(hass, {
-            "entry_id": entry.entry_id,
-            "revision": first["revision"],
-            "changes": [first, second],
-        })
+    with patch.object(
+        hass.config_entries,
+        "async_update_entry",
+        wraps=hass.config_entries.async_update_entry,
+    ) as update:
+        result = await async_batch_save_entities(
+            hass,
+            {
+                "entry_id": entry.entry_id,
+                "revision": first["revision"],
+                "changes": [first, second],
+            },
+        )
         assert update.call_count == 1
     assert result["count"] == 2
     assert set(result["entity_ids"]) == {first["key"], second["key"]}
@@ -233,8 +244,24 @@ async def test_panel_registration_is_once_and_versioned(hass):
     assert register.call_args.kwargs["module_url"] == (
         f"/ha-opcua-panel/panel.js?v=1.4.0&panel={digest}"
     )
-    assert commands.call_count == 10
+    assert commands.call_count == 11
     assert panel_snapshot(hass)["version"] == "1.4.0"
+
+
+async def test_changing_sensor_unit_updates_ha_display_preference(hass, entry):
+    registry = er.async_get(hass)
+    entity = registry.async_get_or_create(
+        "sensor", DOMAIN, "voltage", config_entry=entry, original_name="Voltage"
+    )
+    registry.async_update_entity_options(
+        entity.entity_id, "sensor.private", {"suggested_unit_of_measurement": "V"}
+    )
+
+    _sync_sensor_display_unit(registry, entity.entity_id, "MV", "mV")
+
+    assert registry.async_get(entity.entity_id).options["sensor.private"] == {
+        "suggested_unit_of_measurement": "mV"
+    }
 
 
 async def test_panel_category_exclusion_and_restore_preserve_registry_metadata(

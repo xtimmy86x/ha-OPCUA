@@ -358,6 +358,25 @@ def _migrate_entity_registry(
     return selected.entity_id if selected else None
 
 
+def _sync_sensor_display_unit(registry, entity_id, old_unit, new_unit):
+    """Keep HA's saved display unit aligned when the PLC unit is edited."""
+    if not entity_id or old_unit == new_unit:
+        return
+    entity = registry.async_get(entity_id)
+    if entity.domain != "sensor":
+        return
+    private = dict(entity.options.get("sensor.private", {}))
+    if new_unit is None:
+        private.pop("suggested_unit_of_measurement", None)
+    else:
+        private["suggested_unit_of_measurement"] = new_unit
+    registry.async_update_entity_options(entity_id, "sensor.private", private or None)
+    public = dict(entity.options.get("sensor", {}))
+    if "unit_of_measurement" in public:
+        public["unit_of_measurement"] = new_unit
+        registry.async_update_entity_options(entity_id, "sensor", public)
+
+
 async def async_save_entity(hass, msg):
     entry = hass.config_entries.async_get_entry(msg["entry_id"])
     if entry is None or entry.domain != DOMAIN:
@@ -416,6 +435,12 @@ async def async_save_entity(hass, msg):
                 if row["entity_id"]
                 else name or row["name"]
             ),
+        )
+        _sync_sensor_display_unit(
+            registry,
+            selected_entity_id,
+            saved.get("unit_of_measurement"),
+            settings.get("unit_of_measurement"),
         )
         if platform != row["platform"]:
             # Prevent old controls from writing while the new domain loads.
@@ -494,16 +519,32 @@ async def async_batch_save_entities(hass, msg):
         for key, row, _target, platform, name, area_id in prepared:
             unique_id = f"{entry.entry_id}:{key}"
             related = [
-                e for e in related_entries
+                e
+                for e in related_entries
                 if e.platform == DOMAIN and e.unique_id == unique_id
             ]
             entity_ids[key] = _migrate_entity_registry(
-                hass, entry, c.nodes[key], key, platform, related,
-                name=name, area_id=area_id,
+                hass,
+                entry,
+                c.nodes[key],
+                key,
+                platform,
+                related,
+                name=name,
+                area_id=area_id,
                 suggested_object_id=(
                     row["entity_id"].split(".", 1)[1]
-                    if row["entity_id"] else name or row["name"]
+                    if row["entity_id"]
+                    else name or row["name"]
                 ),
+            )
+            _sync_sensor_display_unit(
+                registry,
+                entity_ids[key],
+                entry.options.get(CONF_NODE_SETTINGS, {})
+                .get(key, {})
+                .get("unit_of_measurement"),
+                options[CONF_NODE_SETTINGS][key].get("unit_of_measurement"),
             )
             if platform != row["platform"]:
                 c._platforms[key] = "disabled"
@@ -515,8 +556,10 @@ async def async_batch_save_entities(hass, msg):
             hass.config_entries.async_update_entry(entry, options=options)
         async_sync_orphan_repairs(hass, entry)
         return {
-            "saved": True, "reload": reload_needed,
-            "entity_ids": entity_ids, "count": len(prepared),
+            "saved": True,
+            "reload": reload_needed,
+            "entity_ids": entity_ids,
+            "count": len(prepared),
         }
 
 

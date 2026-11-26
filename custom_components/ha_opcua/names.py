@@ -2,7 +2,6 @@
 
 import re
 
-
 _QUOTED_PATH = re.compile(r'"((?:[^"]|"")*)"(?:\.|$)')
 
 

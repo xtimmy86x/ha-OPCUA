@@ -21,7 +21,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .arrays import array_element_name, disambiguated_name, parse_array_element
-from .names import full_hierarchy_name, join_hierarchy
 from .const import (
     CONF_CONNECTION_ENABLED,
     CONF_HUB_ID,
@@ -43,6 +42,7 @@ from .const import (
     SERVICE_SET_VALUE,
 )
 from .device import async_register_device
+from .names import full_hierarchy_name, join_hierarchy
 from .node_settings import (
     NUMERIC_TYPES,
     SCALAR_TYPES,
@@ -1016,10 +1016,9 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
                 "node_id": node_id,
                 "target_node_id": target_id,
             }
-            node["full_name"] = (
-                (target or original).get("browse_path")
-                or full_hierarchy_name(target_id, original["name"])
-            )
+            node["full_name"] = (target or original).get(
+                "browse_path"
+            ) or full_hierarchy_name(target_id, original["name"])
             node["browse_segments"] = (target or original).get("browse_segments")
             self.nodes[node_id] = node
             # A brand-new writable numeric/string node defaults to an editable

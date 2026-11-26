@@ -59,7 +59,7 @@ const TEXT = {
       "Solo Auto-Subscription: sopprime un aggiornamento push più piccolo di questa variazione assoluta (es. 0,01 nasconde il rumore in virgola mobile oltre la 2ª cifra decimale). 0 disattiva il filtro. Il polling non è interessato e legge sempre il valore esatto.",
     unit: "Unità di misura",
     unitHelp:
-      "Scegli un'unità standard di Home Assistant, «Nessuna» oppure «Personalizzata…» per digitarne una (es. pieces/min), mostrata accanto al valore.",
+      "Scegli un'unità standard di Home Assistant, «Nessuna» oppure «Personalizzata…». Le maiuscole contano: mV è millivolt, MV è megavolt.",
     filterUnits: "Cerca unità…",
     moreInfo: "Dettagli",
     noMatches: "Nessun risultato",
@@ -304,7 +304,7 @@ const TEXT = {
       "Auto-Subscription only: suppress a push update smaller than this absolute change (e.g. 0.01 hides float noise below the 2nd decimal). 0 disables filtering. Polling is unaffected and always reads the exact value.",
     unit: "Unit of measurement",
     unitHelp:
-      "Pick a standard Home Assistant unit, “None”, or “Custom…” to type one (e.g. pieces/min), shown next to the value.",
+      "Pick a standard Home Assistant unit, “None”, or “Custom…”. Unit symbols are case-sensitive: mV is millivolt, MV is megavolt.",
     filterUnits: "Search units…",
     moreInfo: "Details",
     noMatches: "No results",
@@ -2243,7 +2243,13 @@ class OpcuaNodePanel extends HTMLElement {
             .includes(unitFilter.value.toLowerCase())
         )
           continue;
-        const item = element("div", option.textContent, {
+        const label =
+          key === "unit" && option.value === "mV"
+            ? "mV · millivolt"
+            : key === "unit" && option.value === "MV"
+              ? "MV · megavolt"
+              : option.textContent;
+        const item = element("div", label, {
           role: "option",
           id: `${key}-option-${unitList.children.length}`,
           "aria-selected": String(option.value === unit.value),

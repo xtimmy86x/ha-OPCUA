@@ -203,7 +203,9 @@ def async_setup_node_entities(
             if node_id not in added:
                 added.add(node_id)
                 entities.append(
-                    entity_class(coordinator, node["full_name"], node_id, entry.entry_id)
+                    entity_class(
+                        coordinator, node["full_name"], node_id, entry.entry_id
+                    )
                 )
         if entities:
             async_add_entities(entities)
